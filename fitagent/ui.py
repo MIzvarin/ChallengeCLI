@@ -197,7 +197,7 @@ class FitAgentApp(App):
             yield Static("", id="profile-bar", markup=False)
             yield RichLog(id="chat", wrap=True, markup=False, max_lines=3000)
             yield ResponseLoader(id="response-loader")
-            yield Static("/profile   /progress   /logs   /help", id="status", markup=False)
+            yield Static("/profile   /progress   /logs   /clear   /help", id="status", markup=False)
             yield Input(placeholder="Напишите сообщение…", id="question")
         yield Footer()
 
@@ -232,6 +232,25 @@ class FitAgentApp(App):
         if len(self.screen_stack) == 1:
             self.push_screen(LogsScreen())
 
+    def action_clear(self):
+        if self.busy or len(self.screen_stack) != 1:
+            return
+        log = self.query_one("#chat", RichLog)
+        try:
+            self.service.clear()
+        except Exception:
+            log.write(
+                "Не удалось очистить данные. Повторите попытку; проверьте доступ к папке данных."
+            )
+            return
+        log.clear()
+        log.write("Данные очищены. Начата новая сессия.")
+        self.query_one("#question", Input).value = ""
+        self.query_one("#response-loader", ResponseLoader).stop()
+        self.query_one("#status", Static).update("/profile   /progress   /logs   /clear   /help")
+        self.refresh_profile()
+        self.action_profile()
+
     def on_input_submitted(self, event):
         if event.input.id != "question" or self.busy:
             return
@@ -241,6 +260,8 @@ class FitAgentApp(App):
         event.input.value = ""
         if text == "/logs":
             self.action_logs()
+        elif text == "/clear":
+            self.action_clear()
         elif text == "/profile":
             self.action_profile()
         elif text == "/progress":
@@ -254,6 +275,8 @@ class FitAgentApp(App):
         elif text == "/help":
             self.query_one("#chat", RichLog).write(
                 "/profile — профиль и новая цель; /progress — вес; /logs — аудит; Ctrl+Q — выход.\n"
+                "/clear — без подтверждения удаляет профиль, цели, переписку, сводки и логи, "
+                "начинает новую сессию. API-ключ остаётся.\n"
                 "После отказа обновлять профиль напомним через сутки. "
                 "Профиль и переписка передаются API. Ответы не заменяют врача."
             )
@@ -283,7 +306,7 @@ class FitAgentApp(App):
             field.value = text
         finally:
             loader.stop()
-            status.update("/profile   /progress   /logs   /help")
+            status.update("/profile   /progress   /logs   /clear   /help")
             self.busy = False
             field.disabled = False
             field.focus()

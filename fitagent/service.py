@@ -25,6 +25,9 @@ class FitnessService:
     def audit(self, kind, details):
         self.store.event(kind, details, self.clock())
 
+    def clear(self):
+        self.client.session_id = self.store.clear()
+
     def due(self):
         result = reminder_due(self.store.latest("profiles"), self.clock())
         self.audit("profile_check", {"due": result, "policy": "7d_or_1d_after_defer"})

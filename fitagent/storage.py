@@ -5,6 +5,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 
 class Storage:
@@ -141,11 +142,26 @@ class Storage:
         return "\n".join(f"{r['created_at']}  {r['kind']}  {r['details']}" for r in reversed(rows))
 
     def session_id(self):
-        from uuid import uuid4
-
         with self.connect() as db:
             db.execute("INSERT OR IGNORE INTO settings VALUES ('session', ?)", (str(uuid4()),))
             return db.execute("SELECT value FROM settings WHERE key='session'").fetchone()[0]
+
+    def clear(self):
+        """Atomically remove application records and create a fresh session identity."""
+        session_id = str(uuid4())
+        with self.connect() as db:
+            for table in (
+                "profiles",
+                "goals",
+                "messages",
+                "changes",
+                "summaries",
+                "events",
+                "settings",
+            ):
+                db.execute(f"DELETE FROM {table}")
+            db.execute("INSERT INTO settings VALUES ('session', ?)", (session_id,))
+        return session_id
 
     def weights(self):
         with self.connect() as db:
