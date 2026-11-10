@@ -195,7 +195,7 @@ class FitAgentApp(App):
         with Vertical(id="workspace"):
             yield Static("fitagent", id="brand")
             yield Static("", id="profile-bar", markup=False)
-            yield RichLog(id="chat", wrap=True, markup=False, max_lines=3000)
+            yield RichLog(id="chat", wrap=True, markup=False)
             yield ResponseLoader(id="response-loader")
             yield Static("/profile   /progress   /logs   /clear   /help", id="status", markup=False)
             yield Input(placeholder="Напишите сообщение…", id="question")
@@ -203,11 +203,32 @@ class FitAgentApp(App):
 
     def on_mount(self):
         self.refresh_profile()
-        chat = self.query_one("#chat", RichLog)
-        chat.write("Питание, тренировки и ваш прогресс. Начните с вопроса.")
+        self.restore_chat()
         self.set_interval(60, self.check_reminder)
         self.query_one("#question", Input).focus()
         self.check_reminder()
+
+    def restore_chat(self):
+        chat = self.query_one("#chat", RichLog)
+        try:
+            messages = self.service.store.chat_messages()
+        except Exception:
+            chat.write(
+                "Не удалось загрузить переписку. Перезапустите приложение; "
+                "если ошибка повторяется, проверьте доступ к папке данных."
+            )
+            return
+        if not messages:
+            chat.write("Питание, тренировки и ваш прогресс. Начните с вопроса.")
+        for message in messages:
+            if message["role"] == "assistant":
+                chat.write(Markdown("**FitAgent**\n\n" + message["content"]))
+            else:
+                chat.write(f"\nВы · {message['created_at'][:10]}\n{message['content']}")
+                if message["status"] == "failed":
+                    chat.write("Ответ не получен. При необходимости отправьте вопрос ещё раз.")
+                elif message["status"] == "pending":
+                    chat.write("Запрос не завершён. При необходимости отправьте вопрос ещё раз.")
 
     def refresh_profile(self, saved=None):
         profile = self.service.store.latest("profiles")

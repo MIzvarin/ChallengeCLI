@@ -104,6 +104,14 @@ class Storage:
         with self.connect() as db:
             db.execute("UPDATE messages SET status=? WHERE id=?", (status, message_id))
 
+    def chat_messages(self):
+        """Return every saved chat message, independently of the LLM context window."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT created_at,role,content,status FROM messages ORDER BY id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def history(self, since):
         with self.connect() as db:
             messages = db.execute(
