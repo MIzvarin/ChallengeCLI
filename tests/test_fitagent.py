@@ -11,14 +11,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, RichLog, Static
 
 from fitagent.domain import SYSTEM_PROMPT, bmi_warning, token_bound, validate_profile
 from fitagent.loader import ResponseLoader
+from fitagent.logs import LogsPanel
 from fitagent.provider import ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
-from fitagent.ui import FitAgentApp, LogsScreen, ProfileScreen, RiskScreen
+from fitagent.ui import FitAgentApp, ProfileScreen, RiskScreen
 
 NOW = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
 
@@ -368,8 +369,11 @@ async def tui_commands():
             field.value = "/logs"
             await pilot.press("enter")
             await pilot.pause()
-            assert isinstance(app.screen, LogsScreen)
-            await pilot.press("escape")
+            assert len(app.screen_stack) == 1
+            assert app.query_one(LogsPanel).display
+            field.value = "/logs"
+            await pilot.press("enter")
+            assert not app.query_one(LogsPanel).display
             field.value = "Как тренироваться?"
             await pilot.press("enter")
             await app.workers.wait_for_complete()
@@ -388,6 +392,44 @@ async def tui_commands():
             await pilot.press("ctrl+q")
             await pilot.pause()
             assert app._exit
+
+
+async def tui_exit_command():
+    for logs_open in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            store, client, service = fixture(directory)
+            service.save(profile())
+            store.message("user", "Сохранённый вопрос", NOW)
+            store.message("assistant", "Сохранённый ответ", NOW)
+            saved_profile = store.latest("profiles")
+            saved_messages = store.chat_messages()
+            session = store.session_id()
+            app = FitAgentApp(service)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                field = app.query_one("#question", Input)
+                assert "/exit" in str(app.query_one("#status", Static).renderable)
+                field.value = "/help"
+                await pilot.press("enter")
+                await pilot.pause()
+                text = "\n".join(line.text for line in app.query_one("#chat", RichLog).lines)
+                assert "/exit или Ctrl+Q" in text
+                if logs_open:
+                    app.action_logs()
+                    await pilot.pause()
+                field.value = " /exit "
+                await pilot.press("enter")
+                await pilot.pause()
+                assert app._exit
+            reopened = Storage(directory)
+            assert reopened.latest("profiles") == saved_profile
+            assert reopened.chat_messages() == saved_messages
+            assert reopened.session_id() == session
+            client.generate.assert_not_called()
+
+
+def test_tui_exit_command_preserves_data_and_does_not_call_api():
+    asyncio.run(tui_exit_command())
 
 
 async def tui_form_errors():
@@ -457,8 +499,10 @@ async def tui_response_loader():
                     assert 0 <= loader.region.y < loader.region.bottom <= 24
                     app.action_logs()
                     await pilot.pause()
-                    assert isinstance(app.screen, LogsScreen)
-                    await pilot.press("escape")
+                    assert len(app.screen_stack) == 1
+                    assert app.query_one(LogsPanel).display
+                    await pilot.press("ctrl+l")
+                    assert not app.query_one(LogsPanel).display
                     assert loader.display
                 finally:
                     released.set()

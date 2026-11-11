@@ -3,13 +3,15 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from textual.widgets import Button, Input
 
+from fitagent.logs import LogsPanel
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
-from fitagent.ui import FitAgentApp, LogsScreen, ProfileScreen, RiskScreen
+from fitagent.ui import FitAgentApp, ProfileScreen, RiskScreen
 
 
 def assert_inside(widget, width, height):
@@ -45,8 +47,24 @@ async def layout_flow():
                 assert not any(edge[0] for edge in app.query_one("#chat").styles.border)
                 app.action_logs()
                 await pilot.pause()
-                assert isinstance(app.screen, LogsScreen)
-                assert_inside(app.screen.query_one("#close", Button), width, height)
+                assert len(app.screen_stack) == 1
+                panel = app.query_one(LogsPanel)
+                assert panel.display
+                for selector in ("#chat", "#logs-panel", "#token-counts", "#events", "#question"):
+                    assert_inside(app.query_one(selector), width, height)
+                assert app.query_one("#chat").region.bottom <= panel.region.y
+                assert panel.region.bottom <= app.query_one("#question").region.y
+                background = panel.styles.border_top[1]
+                assert background.r == background.g == background.b
+                # Missing usage wraps the completeness warning, but logs and input still fit.
+                service.store.event(
+                    "api_request", {"purpose": "answer"}, datetime.now(timezone.utc)
+                )
+                panel.refresh_logs()
+                await pilot.pause()
+                for selector in ("#chat", "#token-counts", "#events", "#question"):
+                    assert_inside(app.query_one(selector), width, height)
+                assert app.query_one("#events").region.bottom <= panel.region.bottom
 
 
 def test_monochrome_layout():

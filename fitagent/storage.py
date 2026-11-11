@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from fitagent.tokens import collect_usage
+
 
 class Storage:
     """Single-user storage; each operation owns its connection for worker safety."""
@@ -148,6 +150,17 @@ class Storage:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return "\n".join(f"{r['created_at']}  {r['kind']}  {r['details']}" for r in reversed(rows))
+
+    def token_usage(self, include_history=False):
+        """Read the entire conversation's API accounting, not just the visible logs."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT kind,details FROM events "
+                "WHERE kind IN ('api_request','api_usage') ORDER BY id"
+            )
+            return collect_usage(
+                ((row["kind"], json.loads(row["details"])) for row in rows), include_history
+            )
 
     def session_id(self):
         with self.connect() as db:

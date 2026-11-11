@@ -3,7 +3,6 @@
 import asyncio
 from datetime import date
 
-from rich.markdown import Markdown
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -11,8 +10,11 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Label, RichLog, Static
 
+from fitagent.chat import write_message
 from fitagent.domain import validate_profile
 from fitagent.loader import ResponseLoader
+from fitagent.logs import LogsPanel
+from fitagent.token_chart import TokensScreen
 
 
 class RiskScreen(ModalScreen):
@@ -32,32 +34,6 @@ class RiskScreen(ModalScreen):
 
     def on_button_pressed(self, event):
         self.dismiss(event.button.id == "confirm")
-
-
-class LogsScreen(ModalScreen):
-    BINDINGS = [("escape", "close", "Назад")]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog", classes="logs-dialog"):
-            yield Label("Журнал", classes="title")
-            yield Static("Без содержимого переписки", classes="muted")
-            yield RichLog(id="events", wrap=True, markup=False)
-            yield Button("Закрыть · Esc", id="close")
-
-    def on_mount(self):
-        self.refresh_logs()
-        self.set_interval(2, self.refresh_logs)
-
-    def refresh_logs(self):
-        log = self.query_one("#events", RichLog)
-        log.clear()
-        log.write(self.app.service.store.logs() or "Событий пока нет.")
-
-    def action_close(self):
-        self.dismiss()
-
-    def on_button_pressed(self):
-        self.dismiss()
 
 
 class ProfileScreen(ModalScreen):
@@ -144,8 +120,13 @@ class FitAgentApp(App):
                  align-horizontal: center; }
     #brand { height: 2; color: #e0e0e0; text-style: bold; }
     #profile-bar { height: auto; max-height: 4; margin-bottom: 1; color: #929292; }
-    RichLog { background: transparent; color: #d4d4d4; border: none; padding: 0; }
-    #chat { height: 1fr; margin: 1 0; }
+    RichLog { background: transparent; color: #d4d4d4; padding: 0; }
+    #chat { height: 1fr; margin: 1 0; border: none; scrollbar-gutter: stable; }
+    #workspace.logs-open { padding: 0 2; }
+    #workspace.logs-open #brand { height: 1; }
+    #workspace.logs-open #profile-bar { max-height: 2; margin-bottom: 0; }
+    #workspace.logs-open #chat { min-height: 3; margin: 0; }
+    #workspace.logs-open #question { margin-top: 0; }
     #status { height: 1; color: #8a8a8a; }
     Input { height: 3; border: none; border-left: wide #242424; padding: 1;
             background: #1c1c1c; color: #dedede; }
@@ -164,7 +145,6 @@ class FitAgentApp(App):
     #dialog { width: 86%; max-width: 76; height: 90%; padding: 1 3;
               background: #191919; border: none; }
     #dialog.risk-dialog { height: 70%; max-height: 26; }
-    #dialog.logs-dialog { max-width: 108; }
     #profile-fields { height: 1fr; margin-top: 1; }
     #warning-body { height: 1fr; }
     .title { height: auto; text-style: bold; color: #e0e0e0; margin-bottom: 1; }
@@ -180,7 +160,6 @@ class FitAgentApp(App):
     Button.-active { background: #a0a0a0; color: #121212; }
     Button:disabled { background: #202020; color: #777777; text-opacity: 100%; }
     #form-error { height: auto; max-height: 5; color: #d0d0d0; margin-top: 1; }
-    #events { height: 1fr; min-height: 4; margin-top: 1; }
     * { scrollbar-size: 1 1; scrollbar-color: #424242; scrollbar-color-hover: #626262;
         scrollbar-color-active: #858585; scrollbar-background: #191919;
         scrollbar-background-hover: #191919; scrollbar-background-active: #191919; }
@@ -195,9 +174,14 @@ class FitAgentApp(App):
         with Vertical(id="workspace"):
             yield Static("fitagent", id="brand")
             yield Static("", id="profile-bar", markup=False)
-            yield RichLog(id="chat", wrap=True, markup=False)
+            yield RichLog(id="chat", min_width=1, wrap=True, markup=False)
+            yield LogsPanel(self.service.store, id="logs-panel")
             yield ResponseLoader(id="response-loader")
-            yield Static("/profile   /progress   /logs   /clear   /help", id="status", markup=False)
+            yield Static(
+                "/profile   /progress   /logs   /tokens   /clear   /help   /exit",
+                id="status",
+                markup=False,
+            )
             yield Input(placeholder="Напишите сообщение…", id="question")
         yield Footer()
 
@@ -221,14 +205,13 @@ class FitAgentApp(App):
         if not messages:
             chat.write("Питание, тренировки и ваш прогресс. Начните с вопроса.")
         for message in messages:
-            if message["role"] == "assistant":
-                chat.write(Markdown("**FitAgent**\n\n" + message["content"]))
-            else:
-                chat.write(f"\nВы · {message['created_at'][:10]}\n{message['content']}")
-                if message["status"] == "failed":
-                    chat.write("Ответ не получен. При необходимости отправьте вопрос ещё раз.")
-                elif message["status"] == "pending":
-                    chat.write("Запрос не завершён. При необходимости отправьте вопрос ещё раз.")
+            write_message(
+                chat,
+                message["role"],
+                message["content"],
+                message["created_at"] if message["role"] == "user" else "",
+                message["status"],
+            )
 
     def refresh_profile(self, saved=None):
         profile = self.service.store.latest("profiles")
@@ -251,7 +234,10 @@ class FitAgentApp(App):
 
     def action_logs(self):
         if len(self.screen_stack) == 1:
-            self.push_screen(LogsScreen())
+            panel = self.query_one("#logs-panel", LogsPanel)
+            panel.display = not panel.display
+            self.query_one("#workspace").set_class(panel.display, "logs-open")
+            panel.refresh_logs()
 
     def action_clear(self):
         if self.busy or len(self.screen_stack) != 1:
@@ -268,9 +254,16 @@ class FitAgentApp(App):
         log.write("Данные очищены. Начата новая сессия.")
         self.query_one("#question", Input).value = ""
         self.query_one("#response-loader", ResponseLoader).stop()
-        self.query_one("#status", Static).update("/profile   /progress   /logs   /clear   /help")
+        self.query_one("#status", Static).update(
+            "/profile   /progress   /logs   /tokens   /clear   /help   /exit"
+        )
         self.refresh_profile()
+        self.query_one("#logs-panel", LogsPanel).refresh_logs()
         self.action_profile()
+
+    def action_tokens(self):
+        if len(self.screen_stack) == 1:
+            self.push_screen(TokensScreen(self.service.store))
 
     def on_input_submitted(self, event):
         if event.input.id != "question" or self.busy:
@@ -281,6 +274,10 @@ class FitAgentApp(App):
         event.input.value = ""
         if text == "/logs":
             self.action_logs()
+        elif text == "/tokens":
+            self.action_tokens()
+        elif text == "/exit":
+            self.exit()
         elif text == "/clear":
             self.action_clear()
         elif text == "/profile":
@@ -295,7 +292,12 @@ class FitAgentApp(App):
                 log.write(f"Изменение: {rows[-1]['weight'] - rows[0]['weight']:+.1f} кг")
         elif text == "/help":
             self.query_one("#chat", RichLog).write(
-                "/profile — профиль и новая цель; /progress — вес; /logs — аудит; Ctrl+Q — выход.\n"
+                "/profile — профиль и новая цель; /progress — вес; /logs — аудит.\n"
+                "/tokens — график накопленного расхода токенов; Escape — вернуться в чат.\n"
+                "/exit или Ctrl+Q — закрыть приложение без удаления сохранённых данных.\n"
+                "/logs или Ctrl+L — показать/скрыть нижнюю панель логов и токенов. "
+                "Контекст и ответ — по статистике API после получения ответа; "
+                "общий расход включает оценку цели и сводки.\n"
                 "/clear — без подтверждения удаляет профиль, цели, переписку, сводки и логи, "
                 "начинает новую сессию. API-ключ остаётся.\n"
                 "После отказа обновлять профиль напомним через сутки. "
@@ -312,14 +314,14 @@ class FitAgentApp(App):
         field = self.query_one("#question", Input)
         field.disabled = True
         log = self.query_one("#chat", RichLog)
-        log.write(f"\nВы · {date.today().isoformat()}\n{text}")
+        write_message(log, "user", text, date.today().isoformat())
         status = self.query_one("#status", Static)
         status.update("Ctrl+L · журнал")
         loader = self.query_one("#response-loader", ResponseLoader)
         loader.start()
         try:
             answer = await asyncio.to_thread(self.service.answer, text)
-            log.write(Markdown("**FitAgent**\n\n" + answer))
+            write_message(log, "assistant", answer)
         except Exception as exc:
             # No traceback/request payload in UI or logs; audit only exception type.
             self.service.audit("ui_error", {"type": type(exc).__name__})
@@ -327,7 +329,8 @@ class FitAgentApp(App):
             field.value = text
         finally:
             loader.stop()
-            status.update("/profile   /progress   /logs   /clear   /help")
+            self.query_one("#logs-panel", LogsPanel).refresh_logs()
+            status.update("/profile   /progress   /logs   /tokens   /clear   /help   /exit")
             self.busy = False
             field.disabled = False
             field.focus()

@@ -4,6 +4,8 @@ import json
 
 import httpx
 
+from fitagent.tokens import api_usage
+
 
 class ModelClient:
     def __init__(self, key, url, model, session_id, audit):
@@ -38,25 +40,13 @@ class ModelClient:
                     f"API вернул HTTP {response.status_code}. Проверьте ключ и лимиты."
                 )
             data = response.json()
+            self.audit("api_usage", {"purpose": purpose, **api_usage(data)})
             choice = data["choices"][0]
             if choice.get("finish_reason") == "length":
                 raise ValueError("Ответ обрезан лимитом модели; результат не сохранён как полный.")
             text = choice["message"]["content"]
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("API вернул пустой ответ.")
-            usage = data.get("usage") or {}
-            details = usage.get("prompt_tokens_details") or {}
-            self.audit(
-                "api_usage",
-                {
-                    "purpose": purpose,
-                    "input_tokens": usage.get("prompt_tokens"),
-                    "output_tokens": usage.get("completion_tokens"),
-                    "cached_tokens": details.get(
-                        "cached_tokens", usage.get("prompt_cache_hit_tokens")
-                    ),
-                },
-            )
             return text.strip()
         except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             self.audit("api_error", {"purpose": purpose, "type": type(exc).__name__})
