@@ -1,5 +1,8 @@
 """An inline audit panel that leaves the chat and its input available."""
 
+import re
+
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import RichLog
@@ -46,6 +49,13 @@ class LogsPanel(Vertical):
         counts.show_report(report)
         if text != self.last_logs:
             log = self.query_one("#events", RichLog)
+            events = Text(text)
+            for match in re.finditer(
+                r"^\S+  (summary_started|summary_finished|summary_cache_hit)  ",
+                text,
+                re.MULTILINE,
+            ):
+                events.stylize("blue", match.start(1), match.end(1))
             log.clear()
-            log.write(text)
+            log.write(events)
             self.last_logs = text

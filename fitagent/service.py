@@ -13,7 +13,7 @@ from fitagent.domain import (
     validate_profile,
 )
 
-HISTORY_LIMIT = 100_000
+HISTORY_LIMIT = 50_000
 SUMMARY_LIMIT = 20_000
 
 

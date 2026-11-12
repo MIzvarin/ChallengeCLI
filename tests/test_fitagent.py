@@ -216,6 +216,32 @@ def test_summarization_cache_and_full_profile():
         assert len(store.history((NOW - timedelta(days=7)).isoformat())) >= 15
 
 
+def test_compaction_starts_only_above_50000_utf8_bytes():
+    for size in (49_999, 50_000, 50_001):
+        with tempfile.TemporaryDirectory() as directory:
+            store, client, service = fixture(directory)
+            content_size = size - token_bound(f"{NOW.isoformat()} user: ")
+            content = "я" * (content_size // 2) + "x" * (content_size % 2)
+            store.message("user", content, NOW)
+            since = (NOW - timedelta(days=7)).isoformat()
+            original = store.history(since)
+            history = "\n".join(original)
+            assert token_bound(history) == size
+            context = service.context(service.system())
+            if size <= 50_000:
+                assert context == history
+                client.generate.assert_not_called()
+                assert "history_verbatim" in store.logs()
+                assert "summary_started" not in store.logs()
+            else:
+                assert context.startswith("СВОДКА:\nОтвет")
+                client.generate.assert_called_once()
+                assert client.generate.call_args.args[1:] == (20_000, "summarization")
+                assert "summary_started" in store.logs()
+                assert "summary_finished" in store.logs()
+            assert store.history(since) == original
+
+
 def test_summary_limit():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
