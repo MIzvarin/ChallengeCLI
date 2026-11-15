@@ -1,4 +1,4 @@
-"""Compaction event highlighting in the audit panel; no external API calls."""
+"""Only public compaction labels are highlighted in the simplified log panel."""
 
 import asyncio
 import tempfile
@@ -31,6 +31,8 @@ async def compaction_highlighting_flow():
                     {"note": "summary_started  summary_finished  [red]текст[/red]"},
                     NOW,
                 )
+            store.event("history_compacted", {"before_bytes": 60_000, "after_bytes": 10_000}, NOW)
+            store.event("facts_read", {"fact_ids": [1]}, NOW)
             app = FitAgentApp(service)
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
@@ -39,20 +41,25 @@ async def compaction_highlighting_flow():
                 with patch.object(log, "write", wraps=log.write) as write:
                     app.action_logs()
                     await pilot.pause()
-                    for names in (
-                        ("summary_started", "summary_finished"),
-                        ("summary_started", "summary_finished", "summary_cache_hit"),
-                    ):
-                        if "summary_cache_hit" in names:
-                            store.event("summary_cache_hit", {"key": "test"}, NOW)
+                    for count in (1, 2):
+                        if count == 2:
+                            store.event(
+                                "history_compacted",
+                                {"before_bytes": 50_001, "after_bytes": 5000},
+                                NOW,
+                            )
                             panel.refresh_logs()
                         rendered = write.call_args.args[0]
                         assert isinstance(rendered, Text)
-                        assert rendered.plain == store.logs()
-                        assert len(rendered.spans) == len(names)
-                        for span, name in zip(rendered.spans, names):
+                        assert rendered.plain == store.activity_logs()
+                        assert (
+                            "summary_started" not in rendered.plain
+                            and "api_usage" not in rendered.plain
+                        )
+                        assert len(rendered.spans) == count
+                        for span in rendered.spans:
                             assert span.style == "blue"
-                            assert rendered.plain[span.start : span.end] == name
+                            assert rendered.plain[span.start : span.end] == "История сжата"
                             assert rendered.plain[span.start - 2 : span.start] == "  "
                             assert rendered.plain[span.end : span.end + 2] == "  "
                         calls = write.call_count

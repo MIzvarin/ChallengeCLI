@@ -24,7 +24,13 @@ def main():
     )
     store = Storage(directory)
     if args.command == "logs":
-        print(store.logs() or "Событий пока нет.")
+        try:
+            print(store.activity_logs() or "Событий пока нет.")
+        except Exception:
+            parser.exit(
+                1,
+                "Не удалось загрузить журнал. Повторите попытку; проверьте доступ к папке данных.\n",
+            )
         return
 
     def audit(kind, details):

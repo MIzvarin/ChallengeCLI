@@ -9,11 +9,11 @@ def api_usage(data):
     data = data if isinstance(data, dict) else {}
     usage = data.get("usage")
     usage = usage if isinstance(usage, dict) else {}
-    details = usage.get("prompt_tokens_details")
+    details = usage.get("prompt_tokens_details", usage.get("input_tokens_details"))
     details = details if isinstance(details, dict) else {}
     return {
-        "input_tokens": token_count(usage.get("prompt_tokens")),
-        "output_tokens": token_count(usage.get("completion_tokens")),
+        "input_tokens": token_count(usage.get("prompt_tokens", usage.get("input_tokens"))),
+        "output_tokens": token_count(usage.get("completion_tokens", usage.get("output_tokens"))),
         "cached_tokens": token_count(
             details.get("cached_tokens", usage.get("prompt_cache_hit_tokens"))
         ),

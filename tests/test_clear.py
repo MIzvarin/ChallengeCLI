@@ -28,6 +28,9 @@ def fixture(directory):
         session_id=store.session_id(),
         model="test-model",
         generate=Mock(return_value='{"warning":""}'),
+        generate_structured=Mock(
+            return_value='{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}'
+        ),
     )
     service = FitnessService(store, client, clock=lambda: NOW)
     profile = validate_profile(180, 80, "мужской", 30, "OLD_GOAL", "")

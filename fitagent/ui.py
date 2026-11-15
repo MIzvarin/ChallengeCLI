@@ -10,11 +10,13 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Label, RichLog, Static
 
-from fitagent.chat import write_message
+from fitagent.chat import write_message, write_topic_notice
 from fitagent.domain import validate_profile
 from fitagent.loader import ResponseLoader
 from fitagent.logs import LogsPanel
 from fitagent.token_chart import TokensScreen
+
+COMMAND_HINT = "/profile  /progress  /memory  /logs  /tokens  /clear  /help  /exit"
 
 
 class RiskScreen(ModalScreen):
@@ -98,7 +100,8 @@ class ProfileScreen(ModalScreen):
             self.service.audit("profile_save_error", {"type": type(exc).__name__})
             error.update(
                 "Не удалось сохранить профиль. Данные формы оставлены без изменений. "
-                "Попробуйте ещё раз. Если ошибка повторяется, откройте журнал командой fitagent logs."
+                "Попробуйте ещё раз. Если ошибка повторяется, перезапустите приложение "
+                "и проверьте доступ к папке данных."
             )
         finally:
             for button in buttons:
@@ -178,7 +181,7 @@ class FitAgentApp(App):
             yield LogsPanel(self.service.store, id="logs-panel")
             yield ResponseLoader(id="response-loader")
             yield Static(
-                "/profile   /progress   /logs   /tokens   /clear   /help   /exit",
+                COMMAND_HINT,
                 id="status",
                 markup=False,
             )
@@ -212,6 +215,7 @@ class FitAgentApp(App):
                 message["created_at"] if message["role"] == "user" else "",
                 message["status"],
             )
+            write_topic_notice(chat, message.get("topic_action"), message.get("topic_title"))
 
     def refresh_profile(self, saved=None):
         profile = self.service.store.latest("profiles")
@@ -254,9 +258,7 @@ class FitAgentApp(App):
         log.write("Данные очищены. Начата новая сессия.")
         self.query_one("#question", Input).value = ""
         self.query_one("#response-loader", ResponseLoader).stop()
-        self.query_one("#status", Static).update(
-            "/profile   /progress   /logs   /tokens   /clear   /help   /exit"
-        )
+        self.query_one("#status", Static).update(COMMAND_HINT)
         self.refresh_profile()
         self.query_one("#logs-panel", LogsPanel).refresh_logs()
         self.action_profile()
@@ -264,6 +266,18 @@ class FitAgentApp(App):
     def action_tokens(self):
         if len(self.screen_stack) == 1:
             self.push_screen(TokensScreen(self.service.store))
+
+    def memory_command(self, text):
+        log = self.query_one("#chat", RichLog)
+        try:
+            self.service.memory.clock = self.service.clock
+            log.write(self.service.memory.command(text))
+        except ValueError as exc:
+            log.write(str(exc))
+        except Exception:
+            log.write(
+                "Не удалось открыть или изменить память. Повторите команду; проверьте доступ к папке данных."
+            )
 
     def on_input_submitted(self, event):
         if event.input.id != "question" or self.busy:
@@ -282,6 +296,8 @@ class FitAgentApp(App):
             self.action_clear()
         elif text == "/profile":
             self.action_profile()
+        elif text == "/memory" or text.startswith("/memory "):
+            self.memory_command(text)
         elif text == "/progress":
             rows = self.service.store.weights()
             log = self.query_one("#chat", RichLog)
@@ -292,16 +308,22 @@ class FitAgentApp(App):
                 log.write(f"Изменение: {rows[-1]['weight'] - rows[0]['weight']:+.1f} кг")
         elif text == "/help":
             self.query_one("#chat", RichLog).write(
-                "/profile — профиль и новая цель; /progress — вес; /logs — аудит.\n"
+                "/profile — профиль и новая цель; /progress — вес; /logs — события.\n"
+                "/memory — факты; /memory edit НОМЕР текст — исправить; "
+                "/memory delete НОМЕР — удалить. Без запросов к API.\n"
                 "/tokens — график накопленного расхода токенов; Escape — вернуться в чат.\n"
                 "/exit или Ctrl+Q — закрыть приложение без удаления сохранённых данных.\n"
                 "/logs или Ctrl+L — показать/скрыть нижнюю панель логов и токенов. "
+                "Только checkpoint в контексте, смена темы, чтение фактов и компакт истории. "
                 "Контекст и ответ — по статистике API после получения ответа; "
-                "общий расход включает оценку цели и сводки.\n"
-                "/clear — без подтверждения удаляет профиль, цели, переписку, сводки и логи, "
+                "общий расход включает оценку цели, сводки и извлечение фактов Luna.\n"
+                "Темы переключаются автоматически; при возврате используется checkpoint. "
+                "Ручных команд переключения нет.\n"
+                "/clear — без подтверждения удаляет профиль, цели, переписку, память, сводки и логи, "
                 "начинает новую сессию. API-ключ остаётся.\n"
                 "После отказа обновлять профиль напомним через сутки. "
-                "Профиль и переписка передаются API. Ответы не заменяют врача."
+                "Профиль и переписка передаются API Go. Для памяти используется Luna; "
+                "провайдер может хранить запросы до 30 дней. Ответы не заменяют врача."
             )
         elif text.startswith("/"):
             self.query_one("#chat", RichLog).write("Неизвестная команда. Доступные: /help")
@@ -321,16 +343,29 @@ class FitAgentApp(App):
         loader.start()
         try:
             answer = await asyncio.to_thread(self.service.answer, text)
+            try:
+                notice = self.service.topics.repository.notice()
+            except Exception:
+                notice = None
+                log.write(
+                    "Ответ сохранён, но отметку темы показать не удалось. Перезапустите приложение."
+                )
+            if notice:
+                write_topic_notice(log, notice["action"], notice["title"])
             write_message(log, "assistant", answer)
         except Exception as exc:
             # No traceback/request payload in UI or logs; audit only exception type.
             self.service.audit("ui_error", {"type": type(exc).__name__})
-            log.write(str(exc) if isinstance(exc, ValueError) else "Ошибка приложения. См. /logs.")
+            log.write(
+                str(exc)
+                if isinstance(exc, ValueError)
+                else "Не удалось обработать запрос. Повторите попытку или перезапустите приложение."
+            )
             field.value = text
         finally:
             loader.stop()
             self.query_one("#logs-panel", LogsPanel).refresh_logs()
-            status.update("/profile   /progress   /logs   /tokens   /clear   /help   /exit")
+            status.update(COMMAND_HINT)
             self.busy = False
             field.disabled = False
             field.focus()

@@ -7,7 +7,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from fitagent.activity import ACTIVITY_KINDS, format_activity
+from fitagent.fact_storage import initialize_memory
 from fitagent.tokens import collect_usage
+from fitagent.topic_storage import initialize_topics
 
 
 class Storage:
@@ -48,6 +51,8 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS messages_time ON messages(created_at);
                 CREATE INDEX IF NOT EXISTS changes_time ON changes(created_at);
             """)
+            initialize_memory(db)
+            initialize_topics(db)
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -110,7 +115,9 @@ class Storage:
         """Return every saved chat message, independently of the LLM context window."""
         with self.connect() as db:
             rows = db.execute(
-                "SELECT created_at,role,content,status FROM messages ORDER BY id"
+                "SELECT m.id,m.created_at,m.role,m.content,m.status,tr.action AS topic_action,t.title AS topic_title "
+                "FROM messages m LEFT JOIN topic_transitions tr ON tr.message_id=m.id "
+                "LEFT JOIN topics t ON t.id=tr.topic_id ORDER BY m.id"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -133,6 +140,14 @@ class Storage:
             row = db.execute("SELECT content FROM summaries WHERE cache_key=?", (key,)).fetchone()
         return row[0] if row else None
 
+    def profile_history(self, since):
+        """Confirmed profile changes are global data, not a different conversation topic."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT created_at,kind,data FROM changes WHERE created_at>=? ORDER BY id", (since,)
+            ).fetchall()
+        return [f"{row['created_at']} {row['kind']}: {row['data']}" for row in rows]
+
     def cache_put(self, key, content, now):
         with self.connect() as db:
             db.execute(
@@ -150,6 +165,24 @@ class Storage:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return "\n".join(f"{r['created_at']}  {r['kind']}  {r['details']}" for r in reversed(rows))
+
+    def activity_logs(self, limit=200):
+        """Select the latest meaningful activity, not the latest raw audit rows."""
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("Количество событий должно быть положительным целым числом.")
+        lines = []
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT created_at,kind,details FROM events WHERE kind IN (?,?,?,?) ORDER BY id DESC",
+                ACTIVITY_KINDS,
+            )
+            for row in rows:
+                line = format_activity(row)
+                if line is not None:
+                    lines.append(line)
+                    if len(lines) == limit:
+                        break
+        return "\n".join(reversed(lines))
 
     def token_usage(self, include_history=False):
         """Read the entire conversation's API accounting, not just the visible logs."""
@@ -177,6 +210,14 @@ class Storage:
                 "messages",
                 "changes",
                 "summaries",
+                "fact_sources",
+                "memory_issues",
+                "memory_turns",
+                "sticky_facts",
+                "topic_messages",
+                "topic_transitions",
+                "checkpoints",
+                "topics",
                 "events",
                 "settings",
             ):

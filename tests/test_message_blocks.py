@@ -60,7 +60,11 @@ async def framed_chat_flow():
         with tempfile.TemporaryDirectory() as directory:
             store = Storage(directory)
             client = SimpleNamespace(
-                model="test-model", generate=Mock(return_value="**Новый ответ**")
+                model="test-model",
+                generate=Mock(return_value="**Новый ответ**"),
+                generate_structured=Mock(
+                    return_value='{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}'
+                ),
             )
             service = FitnessService(store, client, clock=lambda: NOW)
             service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))

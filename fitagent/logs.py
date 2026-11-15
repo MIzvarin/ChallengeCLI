@@ -38,7 +38,7 @@ class LogsPanel(Vertical):
             return
         counts = self.query_one("#token-counts", TokenSummary)
         try:
-            text = self.store.logs() or "Событий пока нет."
+            text = self.store.activity_logs() or "Событий пока нет."
             report = self.store.token_usage()
         except Exception:
             counts.update(
@@ -51,7 +51,7 @@ class LogsPanel(Vertical):
             log = self.query_one("#events", RichLog)
             events = Text(text)
             for match in re.finditer(
-                r"^\S+  (summary_started|summary_finished|summary_cache_hit)  ",
+                r"^\S+  (История сжата)  ",
                 text,
                 re.MULTILINE,
             ):

@@ -34,6 +34,9 @@ def fixture(directory, generate=None):
     store = Storage(directory)
     client = SimpleNamespace(
         model="deepseek-v4.1-flash",
+        generate_structured=Mock(
+            return_value='{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}'
+        ),
         generate=Mock(
             side_effect=generate
             or (

@@ -6,6 +6,17 @@ from rich.panel import Panel
 from rich.text import Text
 
 
+def write_topic_notice(chat, action, title):
+    label = {
+        "switch": "Новая тема",
+        "resume": "Возвращаемся к теме",
+        "detour": "Короткое отступление",
+        "mixed": "Связанные темы",
+    }.get(action)
+    if label and title:
+        chat.write(Text(f"↳ {label}: {title}", style="#929292"))
+
+
 def write_message(chat, role, content, created_at="", status="complete"):
     assistant = role == "assistant"
     title = "FitAgent" if assistant else "Вы"

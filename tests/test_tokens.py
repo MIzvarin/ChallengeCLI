@@ -175,7 +175,29 @@ async def panel_flow():
         app = FitAgentApp(service)
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
-            transport.post.return_value = reply()
+            transport.post.side_effect = [
+                httpx.Response(
+                    200,
+                    json={
+                        "status": "completed",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": '{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}',
+                                    }
+                                ],
+                            }
+                        ],
+                        "usage": {"input_tokens": 10, "output_tokens": 2},
+                    },
+                ),
+                reply(),
+            ]
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
                 panel = app.query_one(LogsPanel)
@@ -190,18 +212,18 @@ async def panel_flow():
                 await pilot.pause()
                 counts = str(panel.query_one("#token-counts", Static).renderable)
                 assert "контекст: 100" in counts and "ответ: 20" in counts
-                assert "всего: 120" in counts
+                assert "всего: 132" in counts
                 sent = transport.post.call_args.kwargs["json"]["messages"]
                 assert "ПОЛНЫЕ ДАННЫЕ" in sent[0]["content"]
                 assert "Как тренироваться?" in sent[1]["content"]
                 assert not field.disabled
-                assert "api_usage" in "\n".join(
+                assert "api_usage" not in "\n".join(
                     line.text for line in panel.query_one("#events", RichLog).lines
                 )
                 # The timer refreshes new events without reopening the panel.
-                store.event("live_event", {}, NOW)
+                store.event("facts_read", {"fact_ids": [42]}, NOW)
                 await pilot.pause(2.1)
-                assert "live_event" in "\n".join(
+                assert "Факты прочитаны в контекст" in "\n".join(
                     line.text for line in panel.query_one("#events", RichLog).lines
                 )
                 await pilot.press("ctrl+l")
@@ -250,7 +272,7 @@ async def separated_panel_flow():
                 "api_usage", {"purpose": "answer", "input_tokens": 100, "output_tokens": 20}, NOW
             )
             for index in range(80):
-                store.event("test_event", {"index": index}, NOW)
+                store.event("facts_read", {"fact_ids": [index + 1]}, NOW)
             app = FitAgentApp(service)
             async with app.run_test(size=(width, height)) as pilot:
                 await pilot.pause()
