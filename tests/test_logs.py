@@ -24,7 +24,7 @@ async def compaction_highlighting_flow():
         with tempfile.TemporaryDirectory() as directory:
             store = Storage(directory)
             service = FitnessService(store, SimpleNamespace(), clock=lambda: NOW)
-            service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+            service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
             for kind in ("summary_started", "summary_finished", "api_usage", "other_event"):
                 store.event(
                     kind,

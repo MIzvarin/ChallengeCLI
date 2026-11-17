@@ -111,16 +111,27 @@ class TopicRepository:
 
     def snapshot(self):
         with self.store.connect() as db:
-            topics = [dict(row) for row in db.execute("SELECT * FROM topics ORDER BY id")]
+            topics = [
+                dict(row)
+                for row in db.execute("SELECT * FROM topics WHERE closed_at IS NULL ORDER BY id")
+            ]
             last = db.execute(
                 "SELECT * FROM topic_transitions ORDER BY message_id DESC LIMIT 1"
             ).fetchone()
             next_id = db.execute(
                 "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='topics'),0)+1"
             ).fetchone()[0]
+        open_ids = {topic["id"] for topic in topics}
+        active = (
+            last["topic_id"]
+            if last and last["topic_id"] in open_ids
+            else topics[-1]["id"]
+            if topics
+            else None
+        )
         return {
             "topics": topics,
-            "active_topic_id": last["topic_id"] if last else topics[-1]["id"] if topics else None,
+            "active_topic_id": active,
             "revision": last["message_id"] if last else 0,
             "next_id": next_id,
         }
@@ -137,6 +148,8 @@ class TopicRepository:
         where = "tm.topic_id=?" if not legacy else "tm.topic_id IS NULL"
         parameters = [] if legacy else [topic_id]
         where += " AND m.id>? AND m.status='complete'"
+        if not legacy:
+            where += " AND EXISTS (SELECT 1 FROM topics t WHERE t.id=tm.topic_id AND t.closed_at IS NULL)"
         parameters.append(after)
         if since:
             where += " AND m.created_at>=?"

@@ -6,12 +6,12 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from textual.widgets import Button, Input
+from textual.widgets import Input
 
 from fitagent.logs import LogsPanel
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
-from fitagent.ui import FitAgentApp, ProfileScreen, RiskScreen
+from fitagent.ui import FitAgentApp
 
 
 def assert_inside(widget, width, height):
@@ -28,21 +28,8 @@ async def layout_flow():
             app = FitAgentApp(service)
             async with app.run_test(size=(width, height)) as pilot:
                 await pilot.pause()
-                assert isinstance(app.screen, ProfileScreen)
-                for name in ("save", "later"):
-                    button = app.screen.query_one(f"#{name}", Button)
-                    assert_inside(button, width, height)
-                    background = button.styles.background
-                    assert background.r == background.g == background.b
-                background = app.screen.query_one("#dialog").styles.background
-                assert background.r == background.g == background.b
-                await app.push_screen(RiskScreen("Длинное предупреждение. " * 200))
-                await pilot.pause()
-                for name in ("edit", "confirm"):
-                    assert_inside(app.screen.query_one(f"#{name}", Button), width, height)
-                app.pop_screen()
-                app.pop_screen()
-                await pilot.pause()
+                assert len(app.screen_stack) == 1
+                assert service.onboarding.state()["answers"] == {}
                 assert_inside(app.query_one("#question", Input), width, height)
                 assert not any(edge[0] for edge in app.query_one("#chat").styles.border)
                 app.action_logs()

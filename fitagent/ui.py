@@ -6,106 +6,15 @@ from datetime import date
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Input, Label, RichLog, Static
+from textual.containers import Vertical
+from textual.widgets import Footer, Input, RichLog, Static
 
 from fitagent.chat import write_message, write_topic_notice
-from fitagent.domain import validate_profile
 from fitagent.loader import ResponseLoader
 from fitagent.logs import LogsPanel
 from fitagent.token_chart import TokensScreen
 
 COMMAND_HINT = "/profile  /progress  /memory  /logs  /tokens  /clear  /help  /exit"
-
-
-class RiskScreen(ModalScreen):
-    def __init__(self, warning):
-        super().__init__()
-        self.warning = warning
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog", classes="risk-dialog"):
-            yield Label("Проверьте цель", classes="title")
-            with VerticalScroll(id="warning-body"):
-                yield Static(self.warning, markup=False)
-                yield Static("Подтверждение не означает, что цель безопасна.", classes="muted")
-            with Horizontal(classes="buttons"):
-                yield Button("Исправить", id="edit", variant="primary")
-                yield Button("Подтверждаю цель", id="confirm", variant="warning")
-
-    def on_button_pressed(self, event):
-        self.dismiss(event.button.id == "confirm")
-
-
-class ProfileScreen(ModalScreen):
-    def __init__(self, service):
-        super().__init__()
-        self.service = service
-        self.profile = service.store.latest("profiles") or {}
-        self.goal = service.store.latest("goals") or {}
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog", classes="profile-dialog"):
-            yield Label("Профиль", classes="title")
-            yield Static("Раз в неделю · если изменений нет, сохраните как есть", classes="muted")
-            with VerticalScroll(id="profile-fields"):
-                for name, label, value in (
-                    ("height", "Рост, см", self.profile.get("height", "")),
-                    ("weight", "Вес, кг", self.profile.get("weight", "")),
-                    ("sex", "Пол", self.profile.get("sex", "")),
-                    ("age", "Возраст · 18+", self.profile.get("age", "")),
-                    ("goal", "Цель и срок", self.goal.get("text", "")),
-                    ("target", "Целевой вес, кг · необязательно", self.goal.get("target") or ""),
-                ):
-                    yield Label(label)
-                    yield Input(value=str(value), id=name)
-            yield Static("", id="form-error", markup=False)
-            with Horizontal(classes="buttons"):
-                yield Button("Сохранить", id="save", variant="primary")
-                yield Button("Позже · на сутки", id="later", disabled=not bool(self.profile))
-
-    def on_button_pressed(self, event):
-        if event.button.id == "later":
-            self.service.defer()
-            self.dismiss(False)
-        elif event.button.id == "save":
-            self.submit()
-
-    @work(exclusive=True)
-    async def submit(self):
-        buttons = list(self.query(Button))
-        for button in buttons:
-            button.disabled = True
-        error = self.query_one("#form-error", Static)
-        try:
-            values = {
-                name: self.query_one(f"#{name}", Input).value
-                for name in ("height", "weight", "sex", "age", "goal", "target")
-            }
-            profile = validate_profile(**values)
-            error.update("Проверяем цель…")
-            warning = await asyncio.to_thread(self.service.assess_goal, profile)
-            confirmed = False
-            if warning:
-                confirmed = await self.app.push_screen_wait(RiskScreen(warning))
-                if not confirmed:
-                    error.update("Измените цель и сохраните снова.")
-                    return
-            self.service.save(profile, warning, confirmed)
-            self.dismiss(True)
-        except ValueError as exc:
-            error.update(str(exc))
-        except Exception as exc:
-            self.service.audit("profile_save_error", {"type": type(exc).__name__})
-            error.update(
-                "Не удалось сохранить профиль. Данные формы оставлены без изменений. "
-                "Попробуйте ещё раз. Если ошибка повторяется, перезапустите приложение "
-                "и проверьте доступ к папке данных."
-            )
-        finally:
-            for button in buttons:
-                button.disabled = button.id == "later" and not bool(self.profile)
 
 
 class FitAgentApp(App):
@@ -189,11 +98,16 @@ class FitAgentApp(App):
         yield Footer()
 
     def on_mount(self):
-        self.refresh_profile()
+        try:
+            self.service.start_chat()
+            self.refresh_profile()
+        except Exception:
+            self.query_one("#chat", RichLog).write(
+                "Не удалось подготовить профиль и опрос. Перезапустите приложение и проверьте доступ к папке данных."
+            )
         self.restore_chat()
         self.set_interval(60, self.check_reminder)
         self.query_one("#question", Input).focus()
-        self.check_reminder()
 
     def restore_chat(self):
         chat = self.query_one("#chat", RichLog)
@@ -218,23 +132,35 @@ class FitAgentApp(App):
             write_topic_notice(chat, message.get("topic_action"), message.get("topic_title"))
 
     def refresh_profile(self, saved=None):
-        profile = self.service.store.latest("profiles")
+        profile = self.service.current_profile()
         goal = self.service.store.latest("goals")
-        text = "Заполните профиль, чтобы начать. Данные хранятся локально."
-        if profile and goal:
+        text = "Ответьте на вопросы в чате. Данные хранятся локально."
+        if profile:
+            weight = (
+                f"{profile['weight']:g} кг" if profile["weight"] is not None else "вес не указан"
+            )
             text = (
-                f"{profile['height']:g} см · {profile['weight']:g} кг · {profile['age']} лет\n"
-                f"Цель: {goal['text']} · целевой вес: {goal['target'] or 'не задан'}"
+                f"{profile['height']:g} см · {weight} · {profile['age']} лет\n"
+                f"Цель: {goal['text'] if goal else 'не задана'} · целевой вес: {goal['target'] or 'не задан' if goal else 'не задан'}"
             )
         self.query_one("#profile-bar", Static).update(text)
 
     def check_reminder(self):
-        if not self.busy and len(self.screen_stack) == 1 and self.service.due():
-            self.action_profile()
+        if not self.busy and self.service.current_profile() and self.service.due():
+            self.query_one("#chat", RichLog).write(
+                "Проверьте актуальность веса, режима и цели. Сообщите изменения в чате; /profile — просмотр."
+            )
+            self.service.defer()
 
     def action_profile(self):
         if not self.busy and len(self.screen_stack) == 1:
-            self.push_screen(ProfileScreen(self.service), self.refresh_profile)
+            log = self.query_one("#chat", RichLog)
+            try:
+                write_message(log, "assistant", self.service.profile_text())
+            except Exception:
+                log.write(
+                    "Не удалось открыть профиль. Повторите попытку или проверьте базу данных."
+                )
 
     def action_logs(self):
         if len(self.screen_stack) == 1:
@@ -261,7 +187,9 @@ class FitAgentApp(App):
         self.query_one("#status", Static).update(COMMAND_HINT)
         self.refresh_profile()
         self.query_one("#logs-panel", LogsPanel).refresh_logs()
-        self.action_profile()
+        prompt = self.service.start_chat()
+        if prompt:
+            write_message(log, "assistant", prompt)
 
     def action_tokens(self):
         if len(self.screen_stack) == 1:
@@ -299,22 +227,33 @@ class FitAgentApp(App):
         elif text == "/memory" or text.startswith("/memory "):
             self.memory_command(text)
         elif text == "/progress":
-            rows = self.service.store.weights()
             log = self.query_one("#chat", RichLog)
-            log.write("Динамика веса (последние 30 подтверждений):")
+            try:
+                rows = self.service.store.weights()
+            except Exception:
+                log.write(
+                    "Не удалось прочитать историю веса. Повторите попытку или проверьте базу данных."
+                )
+                return
+            log.write("Динамика веса (последние 30 измерений):")
             for row in rows:
                 log.write(f"{row['confirmed_at'][:10]}  {row['weight']:g} кг")
             if rows:
                 log.write(f"Изменение: {rows[-1]['weight'] - rows[0]['weight']:+.1f} кг")
         elif text == "/help":
             self.query_one("#chat", RichLog).write(
-                "/profile — профиль и новая цель; /progress — вес; /logs — события.\n"
+                "/profile — профиль только для чтения; изменения сообщайте в чате. /progress — вес.\n"
                 "/memory — факты; /memory edit НОМЕР текст — исправить; "
-                "/memory delete НОМЕР — удалить. Без запросов к API.\n"
+                "/memory delete НОМЕР — удалить обычный факт. Эти команды не обращаются к API.\n"
+                "Ограничения, лекарства, добавки и измерения исправляйте в чате для проверки безопасности.\n"
+                "/memory history НОМЕР — журнал; /memory archive — архив целей.\n"
+                "/confirm НОМЕР — подтвердить предложение; /cancel НОМЕР — отменить.\n"
                 "/tokens — график накопленного расхода токенов; Escape — вернуться в чат.\n"
                 "/exit или Ctrl+Q — закрыть приложение без удаления сохранённых данных.\n"
                 "/logs или Ctrl+L — показать/скрыть нижнюю панель логов и токенов. "
-                "Только checkpoint в контексте, смена темы, чтение фактов и компакт истории. "
+                "Checkpoint в контексте, смена темы, чтение фактов, компакт истории, "
+                "предупреждения и блокировки безопасности, ошибки проверки безопасности и памяти. "
+                "Успешные проверки скрыты; тексты диалога и личные данные в ленту не попадают. "
                 "Контекст и ответ — по статистике API после получения ответа; "
                 "общий расход включает оценку цели, сводки и извлечение фактов Luna.\n"
                 "Темы переключаются автоматически; при возврате используется checkpoint. "
@@ -322,9 +261,11 @@ class FitAgentApp(App):
                 "/clear — без подтверждения удаляет профиль, цели, переписку, память, сводки и логи, "
                 "начинает новую сессию. API-ключ остаётся.\n"
                 "После отказа обновлять профиль напомним через сутки. "
-                "Профиль и переписка передаются API Go. Для памяти используется Luna; "
+                "Профиль и переписка передаются API Go. Для памяти и отдельной проверки безопасности используется Luna; "
                 "провайдер может хранить запросы до 30 дней. Ответы не заменяют врача."
             )
+        elif text.startswith(("/confirm", "/cancel")):
+            self.ask(text)
         elif text.startswith("/"):
             self.query_one("#chat", RichLog).write("Неизвестная команда. Доступные: /help")
         else:
@@ -342,9 +283,10 @@ class FitAgentApp(App):
         loader = self.query_one("#response-loader", ResponseLoader)
         loader.start()
         try:
-            answer = await asyncio.to_thread(self.service.answer, text)
+            normal_turn = bool(self.service.current_profile()) and not text.startswith("/")
+            answer = await asyncio.to_thread(self.service.chat, text)
             try:
-                notice = self.service.topics.repository.notice()
+                notice = self.service.topics.repository.notice() if normal_turn else None
             except Exception:
                 notice = None
                 log.write(
@@ -353,6 +295,7 @@ class FitAgentApp(App):
             if notice:
                 write_topic_notice(log, notice["action"], notice["title"])
             write_message(log, "assistant", answer)
+            self.refresh_profile()
         except Exception as exc:
             # No traceback/request payload in UI or logs; audit only exception type.
             self.service.audit("ui_error", {"type": type(exc).__name__})

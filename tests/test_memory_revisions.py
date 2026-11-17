@@ -115,7 +115,12 @@ def test_inherited_expired_end_is_rejected_before_answer_and_without_invalid_rev
         assert facts(service) == original
         client.generate.assert_not_called()
         with store.connect() as db:
-            assert db.execute("SELECT COUNT(*) FROM sticky_facts").fetchone()[0] == 1
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM sticky_facts WHERE category!='measurements'"
+                ).fetchone()[0]
+                == 1
+            )
 
 
 def test_end_actions_require_consistent_fields_and_preserve_safety_constraints():

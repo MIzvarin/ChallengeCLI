@@ -96,7 +96,7 @@ class TopicRouter:
                 "clarification": decision["clarification"],
                 "new_topic": new_topic,
                 "parent_topic_id": active if action == "detour" and new_topic else None,
-                "adopt_legacy": not known and action == "continue",
+                "adopt_legacy": not known and snapshot["revision"] == 0 and action == "continue",
                 "revision": snapshot["revision"],
                 "checkpoints": [],
                 "known_topic_ids": list(known),

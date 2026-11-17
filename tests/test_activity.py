@@ -1,4 +1,4 @@
-"""The public log contains four safe activity types, without changing the audit or billing."""
+"""Base activity messages stay safe, without changing the audit or billing."""
 
 import asyncio
 import contextlib
@@ -33,7 +33,7 @@ def activities(store):
         store.event(kind, dict(details, value="PRIVATE_SECRET", title="PRIVATE_SECRET"), NOW)
 
 
-def test_public_log_has_only_four_safe_russian_labels_and_keeps_raw_audit():
+def test_public_log_keeps_base_russian_labels_and_raw_audit():
     with tempfile.TemporaryDirectory() as directory:
         store = Storage(directory)
         activities(store)

@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import httpx
 from rich.text import Text
+from support import EMPTY_TURN, safety_json
+from test_memory import luna_reply
 from textual.widgets import Input, RichLog, Static
 
 from fitagent.domain import validate_profile
@@ -16,7 +18,7 @@ from fitagent.provider import ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
 from fitagent.tokens import api_usage, usage_text
-from fitagent.ui import FitAgentApp, ProfileScreen
+from fitagent.ui import FitAgentApp
 
 NOW = datetime(2026, 11, 11, tzinfo=timezone.utc)
 
@@ -31,7 +33,7 @@ def fixture(directory):
         lambda kind, details: store.event(kind, details, NOW),
     )
     service = FitnessService(store, client, clock=lambda: NOW)
-    service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+    service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
     return store, client, service
 
 
@@ -188,7 +190,7 @@ async def panel_flow():
                                 "content": [
                                     {
                                         "type": "output_text",
-                                        "text": '{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}',
+                                        "text": EMPTY_TURN,
                                     }
                                 ],
                             }
@@ -196,7 +198,9 @@ async def panel_flow():
                         "usage": {"input_tokens": 10, "output_tokens": 2},
                     },
                 ),
+                luna_reply(safety_json()),
                 reply(),
+                luna_reply(safety_json()),
             ]
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
@@ -212,8 +216,8 @@ async def panel_flow():
                 await pilot.pause()
                 counts = str(panel.query_one("#token-counts", Static).renderable)
                 assert "контекст: 100" in counts and "ответ: 20" in counts
-                assert "всего: 132" in counts
-                sent = transport.post.call_args.kwargs["json"]["messages"]
+                assert "всего: 592" in counts
+                sent = transport.post.call_args_list[2].kwargs["json"]["messages"]
                 assert "ПОЛНЫЕ ДАННЫЕ" in sent[0]["content"]
                 assert "Как тренироваться?" in sent[1]["content"]
                 assert not field.disabled
@@ -233,7 +237,7 @@ async def panel_flow():
                 field.value = "/clear"
                 await pilot.press("enter")
                 await pilot.pause()
-                assert isinstance(app.screen, ProfileScreen)
+                assert len(app.screen_stack) == 1
                 counts = str(panel.query_one("#token-counts", Static).renderable)
                 assert "всего: 0" in counts and "контекст: 100" not in counts
 

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from support import EMPTY_TURN, safe_response
 from textual.widgets import Input, RichLog
 
 from fitagent.chart import cumulative_chart
@@ -26,12 +27,11 @@ def fixture(directory):
     client = SimpleNamespace(
         model="test-model",
         generate=Mock(return_value="Ответ"),
-        generate_structured=Mock(
-            return_value='{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}'
-        ),
+        generate_structured=Mock(return_value=EMPTY_TURN),
+        generate_safety=Mock(side_effect=safe_response),
     )
     service = FitnessService(store, client, clock=lambda: NOW)
-    service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+    service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
     return store, client, service
 
 

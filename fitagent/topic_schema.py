@@ -23,10 +23,24 @@ TOPIC_SCHEMA = object_schema(
         "clarification": string_schema(500, nullable=True),
     }
 )
+PROFILE_CHANGE_SCHEMA = object_schema(
+    {
+        "birth_date": string_schema(10, nullable=True),
+        "height": {"type": ["number", "null"]},
+        "sex": string_schema(100, nullable=True),
+        "goal": string_schema(4000, nullable=True),
+        "target": {"type": ["number", "null"]},
+        "clear_target": {"type": "boolean"},
+        "source_quote": {**string_schema(1000), "minLength": 1},
+    }
+)
+PROFILE_CHANGE_SCHEMA = dict(PROFILE_CHANGE_SCHEMA, type=["object", "null"])
 TURN_SCHEMA = object_schema(
     {
         "operations": {"type": "array", "items": OPERATION_SCHEMA, "maxItems": 32},
         "topic": TOPIC_SCHEMA,
+        "profile_change": PROFILE_CHANGE_SCHEMA,
+        "completion": {"type": "string", "enum": ["none", "task", "goal"]},
     }
 )
 TOPIC_ERROR = "Не удалось проверить тему диалога. Темы и факты не изменены. Повторите вопрос."
@@ -55,6 +69,13 @@ topic — условие конкретного плана/меню/обсужд
 Существующий fact_id используй только для того факта, который пользователь действительно меняет.
 Пищевые/медицинские ограничения сохраняй global. При неясной области действия не выдумывай
 общий факт: оставь operations=[] и вопрос clarification. Учитывай буквальные оговорки пользователя.
+profile_change=null, если пользователь не меняет профиль/официальную цель. Иначе заполни только
+явно изменяемые поля, прочие null; clear_target=true только при явном снятии целевого веса.
+source_quote — дословная цитата текущего сообщения. Изменение никогда не считается сохранённым
+до отдельного подтверждения пользователя в приложении. Не заполняй поле weight: это measurements.
+completion=task, если обсуждаемая задача, похоже, завершена; goal — если пользователь сообщил
+о достижении официальной цели. Иначе none. Это только предложение: приложение запросит
+подтверждение. Не путай завершение составления меню с достижением цели пользователя.
 """
 
 

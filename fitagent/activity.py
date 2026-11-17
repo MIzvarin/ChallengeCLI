@@ -3,7 +3,24 @@
 import json
 from datetime import datetime
 
-ACTIVITY_KINDS = ("checkpoint_used", "topic_routed", "facts_read", "history_compacted")
+from fitagent.safety_schema import SAFETY_FAILURE_REASONS
+
+ACTIVITY_KINDS = (
+    "checkpoint_used",
+    "topic_routed",
+    "facts_read",
+    "history_compacted",
+    "safety_checked",
+    "safety_failed",
+    "memory_failed",
+)
+SAFETY_STAGES = {
+    "onboarding": "первичное заполнение профиля",
+    "request": "запрос",
+    "changes": "изменение данных",
+    "response": "ответ",
+    "goal_response": "оценка цели",
+}
 
 
 def integer(value, minimum=0):
@@ -45,6 +62,26 @@ def activity_message(kind, details):
         before, after = details.get("before_bytes"), details.get("after_bytes")
         if integer(before, 1) and integer(after) and after < before:
             return f"История сжата  {before:,} → {after:,} байт UTF-8".replace(",", " ")
+    elif kind in {"safety_checked", "safety_failed"}:
+        stage = SAFETY_STAGES.get(details.get("stage"))
+        if not stage:
+            return None
+        if kind == "safety_checked":
+            status = {"warning": "предупреждение", "block": "заблокировано"}.get(
+                details.get("status")
+            )
+            if status:
+                return f"Проверка безопасности  {stage} · {status}"
+        elif isinstance(details.get("type"), str) and details["type"]:
+            code = details.get("reason")
+            reason = SAFETY_FAILURE_REASONS.get(code) if isinstance(code, str) else None
+            explanation = f" · причина: {reason}" if reason else ""
+            return (
+                f"Ошибка проверки безопасности  {stage}{explanation}"
+                " · запрос остановлен; повторите попытку"
+            )
+    elif kind == "memory_failed" and isinstance(details.get("type"), str) and details["type"]:
+        return "Ошибка проверки памяти  факты не изменены; повторите запрос"
     return None
 
 

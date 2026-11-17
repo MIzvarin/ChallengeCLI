@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fitagent.activity import ACTIVITY_KINDS, format_activity
 from fitagent.fact_storage import initialize_memory
+from fitagent.state_storage import current_weight, initialize_state, profile_weight, weight_rows
 from fitagent.tokens import collect_usage
 from fitagent.topic_storage import initialize_topics
 
@@ -53,6 +54,7 @@ class Storage:
             """)
             initialize_memory(db)
             initialize_topics(db)
+            initialize_state(db)
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -69,19 +71,58 @@ class Storage:
         if table not in {"profiles", "goals"}:
             raise ValueError("Unknown table")
         with self.connect() as db:
-            row = db.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT 1").fetchone()
-        return dict(row) if row else None
+            where = " WHERE completed_at IS NULL" if table == "goals" else ""
+            row = db.execute(f"SELECT * FROM {table}{where} ORDER BY id DESC LIMIT 1").fetchone()
+            result = dict(row) if row else None
+            if result and table == "profiles":
+                weight = current_weight(db)
+                if weight:
+                    result.update(weight)
+                else:
+                    result.update(weight=None, measured_at=None)
+        return result
 
-    def save_profile(self, profile, now, next_date, warning="", confirmed=False):
+    def save_profile(
+        self,
+        profile,
+        now,
+        next_date,
+        warning="",
+        confirmed=False,
+        memory=None,
+        setup_done=False,
+        record_weight=True,
+    ):
         stamp = now.isoformat()
         with self.connect() as db:
-            db.execute(
-                "INSERT INTO profiles(height,weight,sex,age,confirmed_at,next_check) "
-                "VALUES (?,?,?,?,?,?)",
-                (*[profile[k] for k in ("height", "weight", "sex", "age")], stamp, next_date),
-            )
-            old = db.execute("SELECT * FROM goals ORDER BY id DESC LIMIT 1").fetchone()
+            db.execute("BEGIN IMMEDIATE")
+            if memory is not None:
+                from fitagent.fact_storage import FactRepository
+
+                FactRepository(self)._write(db, memory)
+            profile_id = db.execute(
+                "INSERT INTO profiles(height,weight,sex,age,confirmed_at,next_check,birth_date) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    *[profile[k] for k in ("height", "weight", "sex", "age")],
+                    stamp,
+                    next_date,
+                    profile["birth_date"],
+                ),
+            ).lastrowid
+            if record_weight:
+                profile_weight(
+                    db,
+                    profile["weight"],
+                    stamp,
+                    profile_id,
+                    memory.get("weight_source_message_id") if memory else None,
+                )
+            old = db.execute(
+                "SELECT * FROM goals WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
             if not old or (old["text"], old["target"]) != (profile["goal"], profile["target"]):
+                db.execute("UPDATE goals SET completed_at=? WHERE completed_at IS NULL", (stamp,))
                 db.execute(
                     "INSERT INTO goals(text,target,created_at,warning,risk_confirmed) "
                     "VALUES (?,?,?,?,?)",
@@ -91,6 +132,11 @@ class Storage:
                 "INSERT INTO changes(day,created_at,kind,data) VALUES (?,?,?,?)",
                 (now.date().isoformat(), stamp, "profile_confirmed", json.dumps(profile)),
             )
+            if setup_done:
+                db.execute("DELETE FROM chat_state WHERE key='onboarding'")
+                db.execute(
+                    "INSERT OR REPLACE INTO chat_state VALUES ('onboarding_finished','true')"
+                )
 
     def defer(self, next_date):
         with self.connect() as db:
@@ -143,8 +189,15 @@ class Storage:
     def profile_history(self, since):
         """Confirmed profile changes are global data, not a different conversation topic."""
         with self.connect() as db:
+            epoch = db.execute("SELECT value FROM chat_state WHERE key='memory_epoch'").fetchone()
+            if epoch and epoch[0] > since:
+                since = epoch[0]
+            cutoff = db.execute(
+                "SELECT value FROM chat_state WHERE key='memory_change_id'"
+            ).fetchone()
             rows = db.execute(
-                "SELECT created_at,kind,data FROM changes WHERE created_at>=? ORDER BY id", (since,)
+                "SELECT created_at,kind,data FROM changes WHERE created_at>=? AND id>? ORDER BY id",
+                (since, int(cutoff[0]) if cutoff else 0),
             ).fetchall()
         return [f"{row['created_at']} {row['kind']}: {row['data']}" for row in rows]
 
@@ -173,7 +226,8 @@ class Storage:
         lines = []
         with self.connect() as db:
             rows = db.execute(
-                "SELECT created_at,kind,details FROM events WHERE kind IN (?,?,?,?) ORDER BY id DESC",
+                "SELECT created_at,kind,details FROM events "
+                f"WHERE kind IN ({','.join('?' for _ in ACTIVITY_KINDS)}) ORDER BY id DESC",
                 ACTIVITY_KINDS,
             )
             for row in rows:
@@ -220,6 +274,10 @@ class Storage:
                 "topics",
                 "events",
                 "settings",
+                "chat_state",
+                "pending_actions",
+                "memory_journal",
+                "memory_archives",
             ):
                 db.execute(f"DELETE FROM {table}")
             db.execute("INSERT INTO settings VALUES ('session', ?)", (session_id,))
@@ -227,9 +285,4 @@ class Storage:
 
     def weights(self):
         with self.connect() as db:
-            return [
-                dict(r)
-                for r in db.execute(
-                    "SELECT confirmed_at,weight FROM profiles ORDER BY id DESC LIMIT 30"
-                ).fetchall()
-            ][::-1]
+            return weight_rows(db)

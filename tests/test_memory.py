@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
+from support import safe_response, safety_json
 from textual.widgets import Input, RichLog
 
 from fitagent.domain import validate_profile
@@ -29,7 +30,9 @@ DEFAULT_TOPIC = {
     "related_topic_ids": [],
     "clarification": None,
 }
-EMPTY = json.dumps({"operations": [], "topic": DEFAULT_TOPIC})
+EMPTY = json.dumps(
+    {"operations": [], "topic": DEFAULT_TOPIC, "profile_change": None, "completion": "none"}
+)
 
 
 def fixture(directory):
@@ -39,9 +42,11 @@ def fixture(directory):
         session_id=store.session_id(),
         generate=Mock(return_value="Ответ"),
         generate_structured=Mock(return_value=EMPTY),
+        generate_safety=Mock(side_effect=safe_response),
     )
     service = FitnessService(store, client, clock=lambda: NOW)
-    service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+    if not store.latest("profiles"):
+        service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
     return store, client, service
 
 
@@ -68,12 +73,22 @@ def operation(text="Не люблю брокколи", **changes):
 
 def extract(client, *operations):
     client.generate_structured.return_value = json.dumps(
-        {"operations": operations, "topic": DEFAULT_TOPIC}, ensure_ascii=False
+        {
+            "operations": operations,
+            "topic": DEFAULT_TOPIC,
+            "profile_change": None,
+            "completion": "none",
+        },
+        ensure_ascii=False,
     )
 
 
 def facts(service):
-    return service.memory.repository.load()["facts"]
+    return [
+        fact
+        for fact in service.memory.repository.load()["facts"]
+        if fact["category"] != "measurements"
+    ]
 
 
 def error(callback, expected=None):
@@ -261,7 +276,12 @@ def test_duplicates_keep_one_fact_and_multiple_provenance_sources():
         assert first["id"] == second["id"] and first["value"] == second["value"]
         assert second["created_at"] == first["created_at"]
         with store.connect() as db:
-            assert db.execute("SELECT COUNT(*) FROM sticky_facts").fetchone()[0] == 1
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM sticky_facts WHERE category!='measurements'"
+                ).fetchone()[0]
+                == 1
+            )
             assert db.execute("SELECT COUNT(*) FROM fact_sources").fetchone()[0] == 2
             assert db.execute("SELECT COUNT(*) FROM memory_turns").fetchone()[0] == 2
 
@@ -282,7 +302,12 @@ def test_explicit_correction_replaces_old_value_but_not_profile():
         assert current["value"]["text"] == "Теперь люблю брокколи"
         assert current["valid_from"] == (NOW + timedelta(days=1)).isoformat()
         with store.connect() as db:
-            assert [r[0] for r in db.execute("SELECT status FROM sticky_facts ORDER BY id")] == [
+            assert [
+                r[0]
+                for r in db.execute(
+                    "SELECT status FROM sticky_facts WHERE category!='measurements' ORDER BY id"
+                )
+            ] == [
                 "replaced",
                 "active",
             ]
@@ -334,14 +359,16 @@ def test_review_intervals_and_safety_never_expire_due_to_age():
             ("food_restrictions", None),
         ):
             candidate = project(snapshot, [operation(category=category)], 1, NOW)
-            fact = candidate["facts"][0]
+            fact = next(fact for fact in candidate["facts"] if fact["category"] == category)
             assert fact["review_at"] == ((NOW + timedelta(days=days)).isoformat() if days else None)
             service.memory.clock = lambda: NOW + timedelta(days=90)
             sent = json.loads(service.memory.context(candidate))["facts"]
             assert len(sent) == 1 and sent[0]["needs_review"] == bool(days)
         end = (NOW + timedelta(days=45)).isoformat()
         candidate = project(snapshot, [operation(category="agreements", valid_until=end)], 1, NOW)
-        assert candidate["facts"][0]["review_at"] == end
+        assert (
+            next(f for f in candidate["facts"] if f["category"] == "agreements")["review_at"] == end
+        )
 
 
 def test_ambiguity_preserves_value_and_requests_clarification_until_corrected():
@@ -380,7 +407,12 @@ def test_revocation_retains_history_but_removes_fact_from_memory_context():
         service.answer("Это больше неверно")
         assert not facts(service)
         with store.connect() as db:
-            assert db.execute("SELECT status FROM sticky_facts").fetchone()[0] == "revoked"
+            assert (
+                db.execute(
+                    "SELECT status FROM sticky_facts WHERE category!='measurements'"
+                ).fetchone()[0]
+                == "revoked"
+            )
             assert db.execute("SELECT COUNT(*) FROM fact_sources").fetchone()[0] == 2
 
 
@@ -483,9 +515,14 @@ def test_manual_edit_delete_and_validation_do_not_call_api():
         ):
             assert "Traceback" not in error(lambda: service.memory.command(command))
         assert "удалены" in service.memory.command(f"/memory delete {corrected['id']}")
-        assert "пока пуста" in service.memory.command("/memory")
+        assert "Измерения показателей" in service.memory.command("/memory")
         with store.connect() as db:
-            assert db.execute("SELECT COUNT(*) FROM sticky_facts").fetchone()[0] == 0
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM sticky_facts WHERE category!='measurements'"
+                ).fetchone()[0]
+                == 0
+            )
             assert db.execute("SELECT COUNT(*) FROM fact_sources").fetchone()[0] == 0
         assert "Не люблю брокколи" in store.chat_messages()[0]["content"]
         client.generate.assert_not_called()
@@ -579,11 +616,21 @@ def test_end_to_end_go_memory_usage_history_and_new_session():
         store = Storage(directory)
         client = real_client(store)
         service = FitnessService(store, client, clock=lambda: NOW)
-        service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+        service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
             transport.post.side_effect = [
-                luna_reply(json.dumps({"operations": [operation()], "topic": DEFAULT_TOPIC})),
+                luna_reply(
+                    json.dumps(
+                        {
+                            "operations": [operation()],
+                            "topic": DEFAULT_TOPIC,
+                            "profile_change": None,
+                            "completion": "none",
+                        }
+                    )
+                ),
+                luna_reply(safety_json()),
                 httpx.Response(
                     200,
                     json={
@@ -592,16 +639,17 @@ def test_end_to_end_go_memory_usage_history_and_new_session():
                     },
                 ),
             ]
+            transport.post.side_effect = [*transport.post.side_effect, luna_reply(safety_json())]
             service.answer("Не люблю брокколи")
             assert transport.post.call_args_list[0].args == (MEMORY_URL,)
-            chat = transport.post.call_args_list[1].kwargs["json"]
+            chat = transport.post.call_args_list[2].kwargs["json"]
             assert chat["model"] == "flash"
             assert "Не люблю брокколи" in chat["messages"][1]["content"]
             assert "ЗАКРЕПЛЁННЫЕ ФАКТЫ" in chat["messages"][1]["content"]
             report = store.token_usage(include_history=True)
-            assert report["requests"] == 2 and report["total_tokens"] == 340
+            assert report["requests"] == 4 and report["total_tokens"] == 800
             assert report["last_answer"] == {"input_tokens": 100, "output_tokens": 10}
-            assert [point["total_tokens"] for point in report["history"]] == [230, 340]
+            assert [point["total_tokens"] for point in report["history"]] == [230, 460, 570, 800]
             old_session = client.session_id
             service.clear()
             assert not facts(service) and store.token_usage()["requests"] == 0

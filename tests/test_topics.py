@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
+from support import safety_json
 from test_memory import (
     DEFAULT_TOPIC,
     NOW,
@@ -42,6 +43,8 @@ def route(
     client.generate_structured.return_value = json.dumps(
         {
             "operations": operations,
+            "profile_change": None,
+            "completion": "none",
             "topic": {
                 "action": action,
                 "topic_id": topic_id,
@@ -93,7 +96,12 @@ def test_topic_choice_shares_the_single_strict_luna_extraction_request():
             "answer",
         ]
         analysis_messages, schema = client.generate_structured.call_args.args
-        assert schema is TURN_SCHEMA and set(schema["required"]) == {"operations", "topic"}
+        assert schema is TURN_SCHEMA and set(schema["required"]) == {
+            "operations",
+            "topic",
+            "profile_change",
+            "completion",
+        }
         assert schema["additionalProperties"] is False
         payload = json.loads(analysis_messages[1]["content"])
         assert payload["dialogue"]["active_topic_id"] == first
@@ -253,7 +261,12 @@ def test_scope_correction_keeps_lineage_and_delete_removes_all_its_versions():
         assert not json.loads(service.memory.context(topic_id=999))["facts"]
         service.memory.command(f"/memory delete {current['id']}")
         with store.connect() as db:
-            assert db.execute("SELECT COUNT(*) FROM sticky_facts").fetchone()[0] == 0
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM sticky_facts WHERE category!='measurements'"
+                ).fetchone()[0]
+                == 0
+            )
             assert db.execute("SELECT COUNT(*) FROM fact_sources").fetchone()[0] == 0
 
 
@@ -493,7 +506,7 @@ def test_restart_and_old_checkpoint_restore_topic_with_current_profile():
             "height": 180,
             "weight": 79,
             "sex": "мужской",
-            "age": 30,
+            "birth_date": "1996-01-01",
             "goal": "NEW_GOAL",
             "target": None,
         }
@@ -629,14 +642,26 @@ def test_checkpoint_requests_are_included_in_durable_token_totals():
                 "height": 180,
                 "weight": 80,
                 "sex": "мужской",
-                "age": 30,
+                "birth_date": "1996-01-01",
                 "goal": "Сильнее",
                 "target": None,
             }
         )
-        first = json.dumps({"operations": [], "topic": DEFAULT_TOPIC | {"title": "Меню"}})
+        first = json.dumps(
+            {
+                "operations": [],
+                "topic": DEFAULT_TOPIC | {"title": "Меню"},
+                "profile_change": None,
+                "completion": "none",
+            }
+        )
         second = json.dumps(
-            {"operations": [], "topic": DEFAULT_TOPIC | {"action": "switch", "title": "Тренировки"}}
+            {
+                "operations": [],
+                "topic": DEFAULT_TOPIC | {"action": "switch", "title": "Тренировки"},
+                "profile_change": None,
+                "completion": "none",
+            }
         )
         flash = httpx.Response(
             200,
@@ -649,18 +674,27 @@ def test_checkpoint_requests_are_included_in_durable_token_totals():
             transport = factory.return_value.__enter__.return_value
             transport.post.side_effect = [
                 luna_reply(first),
+                luna_reply(safety_json()),
                 flash,
+                luna_reply(safety_json()),
                 luna_reply(second),
                 flash,
+                luna_reply(safety_json()),
                 flash,
+                luna_reply(safety_json()),
             ]
             service.answer("Меню")
             service.answer("Тренировки")
-            assert transport.post.call_count == 5
+            assert transport.post.call_count == 9
             schema = transport.post.call_args_list[0].kwargs["json"]["text"]["format"]
             assert schema["strict"] is True and schema["schema"] is TURN_SCHEMA
+            # The outgoing checkpoint is prepared before the validator receives full context.
+            calls = transport.post.call_args_list
+            assert "Создай checkpoint" in calls[5].kwargs["json"]["messages"][0]["content"]
+            checked = json.loads(calls[6].kwargs["json"]["input"][1]["content"])
+            assert checked["dialogue"] in calls[7].kwargs["json"]["messages"][1]["content"]
         report = Storage(directory).token_usage()
-        assert report["requests"] == 5 and report["total_tokens"] == 790
+        assert report["requests"] == 9 and report["total_tokens"] == 1710
         assert report["last_answer"] == {"input_tokens": 100, "output_tokens": 10}
         assert '"purpose": "checkpoint"' in store.logs()
 
@@ -706,7 +740,7 @@ def test_profile_changes_remain_global_while_conversation_history_is_isolated():
                 "height": 180,
                 "weight": 79,
                 "sex": "мужской",
-                "age": 30,
+                "birth_date": "1996-01-01",
                 "goal": "Новая цель",
                 "target": None,
             }

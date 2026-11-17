@@ -217,7 +217,9 @@ def test_retained_confirmation_keeps_transition_and_records_provenance_without_f
         )
         service.answer("Подтверждаю общий лимит 5000")
         snapshot = service.memory.repository.load(service.clock())
-        assert [fact["id"] for fact in snapshot["facts"]] == [pending["id"]]
+        assert [fact["id"] for fact in snapshot["facts"] if fact["category"] != "measurements"] == [
+            pending["id"]
+        ]
         assert snapshot["previous_versions"][0]["id"] == original["id"]
         assert snapshot["previous_versions"][0]["updated_at"] == service.clock().isoformat()
         assert snapshot["previous_versions"][0]["superseded_at"] == pending["valid_from"]

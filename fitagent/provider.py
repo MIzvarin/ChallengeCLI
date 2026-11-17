@@ -4,6 +4,7 @@ import json
 
 import httpx
 
+from fitagent.safety_schema import SafetyValidationError
 from fitagent.tokens import api_usage
 
 MEMORY_URL = "https://opencode.ai/inference/go/openai/v1/responses"
@@ -34,7 +35,7 @@ class ModelClient:
         except (KeyError, IndexError, TypeError, AttributeError):
             raise ValueError("API вернул неверный формат ответа. Повторите запрос.") from None
 
-    def generate_structured(self, messages, schema):
+    def generate_structured(self, messages, schema, purpose="memory_extraction"):
         """No fallback to JSON mode/plain text and no automatic paid retries."""
         payload = {
             "model": MEMORY_MODEL,
@@ -46,43 +47,58 @@ class ModelClient:
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "sticky_facts",
+                    "name": "safety_check" if purpose.startswith("safety_") else "sticky_facts",
                     "strict": True,
                     "schema": schema,
                 }
             },
         }
-        data = self._post(
-            MEMORY_URL, payload, "memory_extraction", MEMORY_MODEL, MEMORY_OUTPUT_LIMIT
-        )
+        data = self._post(MEMORY_URL, payload, purpose, MEMORY_MODEL, MEMORY_OUTPUT_LIMIT)
+        failure_reason = "response_protocol"
         try:
             if data["status"] != "completed":
+                failure_reason = "response_incomplete"
+                incomplete = data.get("incomplete_details")
+                if isinstance(incomplete, dict) and incomplete.get("reason") == "max_output_tokens":
+                    failure_reason = "output_limit"
                 raise ValueError
             texts = []
             for item in data["output"]:
                 if item["type"] == "reasoning":
                     continue
-                if (
-                    item["type"] != "message"
-                    or item["role"] != "assistant"
-                    or item["status"] != "completed"
-                ):
+                if item["type"] != "message" or item["role"] != "assistant":
+                    raise ValueError
+                if item["status"] != "completed":
+                    failure_reason = "response_incomplete"
                     raise ValueError
                 for part in item["content"]:
+                    if part["type"] == "refusal":
+                        failure_reason = "response_refusal"
+                        raise ValueError
                     if part["type"] != "output_text" or not isinstance(part["text"], str):
                         raise ValueError
                     texts.append(part["text"])
             text = "".join(texts).strip()
             if not text:
+                failure_reason = "response_empty"
                 raise ValueError
             return text
         except (ValueError, KeyError, IndexError, TypeError):
+            if purpose.startswith("safety_"):
+                raise SafetyValidationError(failure_reason) from None
             raise ValueError(
                 "Luna не вернула полный структурированный ответ. Память не обновлена; повторите вопрос."
             ) from None
 
+    def generate_safety(self, messages, stage):
+        from fitagent.safety_schema import SAFETY_SCHEMA
+
+        return self.generate_structured(messages, SAFETY_SCHEMA, purpose="safety_" + stage)
+
     def _post(self, url, payload, purpose, model, output_limit):
         if not self.key:
+            if purpose.startswith("safety_"):
+                raise SafetyValidationError("missing_api_key")
             raise ValueError("Заполните OPENCODE_API_KEY в .env и перезапустите fitagent.")
         self.audit(
             "api_request", {"purpose": purpose, "model": model, "output_limit": output_limit}
@@ -100,6 +116,8 @@ class ModelClient:
                 )
             if response.status_code != 200:
                 self.audit("api_error", {"purpose": purpose, "status": response.status_code})
+                if purpose.startswith("safety_"):
+                    raise SafetyValidationError("http_error", http_status=response.status_code)
                 raise ValueError(
                     f"API вернул HTTP {response.status_code}. Проверьте ключ и лимиты."
                 )
@@ -110,6 +128,15 @@ class ModelClient:
             return data
         except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             self.audit("api_error", {"purpose": purpose, "type": type(exc).__name__})
+            if purpose.startswith("safety_"):
+                reason = "response_protocol"
+                if isinstance(exc, httpx.TimeoutException):
+                    reason = "request_timeout"
+                elif isinstance(exc, httpx.HTTPError):
+                    reason = "network_error"
+                elif isinstance(exc, json.JSONDecodeError):
+                    reason = "invalid_json"
+                raise SafetyValidationError(reason) from None
             raise ValueError(
                 "Не удалось получить ответ сервиса. Повторите запрос; проверьте подключение к интернету."
             ) from None

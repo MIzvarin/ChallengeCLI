@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from support import EMPTY_TURN, safe_response
 from textual.widgets import Input, RichLog
 
 from fitagent.domain import validate_profile
@@ -22,9 +23,8 @@ def fixture(directory):
     client = SimpleNamespace(
         model="test-model",
         generate=Mock(return_value="Свежий ответ"),
-        generate_structured=Mock(
-            return_value='{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}'
-        ),
+        generate_structured=Mock(return_value=EMPTY_TURN),
+        generate_safety=Mock(side_effect=safe_response),
     )
     service = FitnessService(store, client, clock=lambda: NOW)
     return store, client, service
@@ -38,7 +38,7 @@ def chat_text(app):
 def test_chat_messages_include_all_dates_and_statuses():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
-        service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+        service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
         for role, content, stamp, status in (
             ("user", "Старый вопрос", NOW - timedelta(days=30), "complete"),
             ("assistant", "Старый ответ", NOW - timedelta(days=30), "complete"),
@@ -68,7 +68,7 @@ def test_chat_messages_include_all_dates_and_statuses():
 async def restart_flow():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
-        service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+        service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
         store.message("user", "Старый вопрос", NOW - timedelta(days=8))
         store.message("assistant", "**Старый ответ**", NOW - timedelta(days=8))
         store.message("user", "Неудачный вопрос", NOW, "failed")
@@ -121,7 +121,7 @@ def test_chat_restored_after_restart_but_llm_context_stays_weekly():
 async def long_history_flow():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
-        service.save(validate_profile(180, 80, "мужской", 30, "Стать сильнее", ""))
+        service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
         store.message("user", "НАЧАЛО\n" + "Строка\n" * 3100 + "КОНЕЦ", NOW)
         app = FitAgentApp(service)
         async with app.run_test() as pilot:
@@ -136,7 +136,7 @@ async def long_history_flow():
         async with app.run_test() as pilot:
             await pilot.pause()
             assert "НАЧАЛО" not in chat_text(app)
-            assert "Начните с вопроса" in chat_text(app)
+            assert "дату рождения" in chat_text(app)
 
 
 def test_entire_history_remains_scrollable_and_clear_persists():

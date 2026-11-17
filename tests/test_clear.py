@@ -10,13 +10,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
+from support import EMPTY_TURN, safe_response
 from textual.widgets import Input, RichLog
 
 from fitagent.domain import validate_profile
 from fitagent.provider import ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
-from fitagent.ui import FitAgentApp, ProfileScreen
+from fitagent.ui import FitAgentApp
 
 NOW = datetime(2026, 11, 10, tzinfo=timezone.utc)
 TABLES = ("profiles", "goals", "messages", "changes", "summaries", "events")
@@ -28,12 +29,11 @@ def fixture(directory):
         session_id=store.session_id(),
         model="test-model",
         generate=Mock(return_value='{"warning":""}'),
-        generate_structured=Mock(
-            return_value='{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}'
-        ),
+        generate_structured=Mock(return_value=EMPTY_TURN),
+        generate_safety=Mock(side_effect=safe_response),
     )
     service = FitnessService(store, client, clock=lambda: NOW)
-    profile = validate_profile(180, 80, "мужской", 30, "OLD_GOAL", "")
+    profile = validate_profile(180, 80, "мужской", "1996-01-01", "OLD_GOAL", "")
     service.save(profile)
     store.message("user", "OLD_MESSAGE", NOW)
     store.message("assistant", "OLD_ANSWER", NOW)
@@ -133,18 +133,15 @@ async def tui_clear_flow():
                 field.value = "/clear"
                 await pilot.press("enter")
                 await pilot.pause()
-                assert isinstance(app.screen, ProfileScreen)
-                assert len(app.screen_stack) == 2  # Initial profile, not a confirmation dialog.
+                assert len(app.screen_stack) == 1
                 assert client.session_id != old_session
-                assert_empty(store)
+                assert store.latest("profiles") is None
+                assert service.onboarding.state()["answers"] == {}
                 assert not client.generate.called
-                for name in ("height", "weight", "sex", "age", "goal", "target"):
-                    assert app.screen.query_one(f"#{name}", Input).value == ""
                 assert not field.value
                 assert "OLD_VISIBLE_MESSAGE" not in "\n".join(line.text for line in log.lines)
                 # Populate a new profile without touching the API, then exercise /clear again.
                 service.save(profile)
-                app.screen.dismiss(True)
                 await pilot.pause()
 
 

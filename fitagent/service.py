@@ -4,8 +4,10 @@ import hashlib
 import json
 from datetime import datetime, timedelta
 
+from fitagent.chat_actions import ChatActions
 from fitagent.domain import (
     SYSTEM_PROMPT,
+    age_on,
     bmi_warning,
     next_check,
     reminder_due,
@@ -13,6 +15,9 @@ from fitagent.domain import (
     validate_profile,
 )
 from fitagent.memory import CONTEXT_RULES, FactMemory
+from fitagent.memory_schema import parse_stamp
+from fitagent.onboarding import ChatOnboarding
+from fitagent.safety import SafetyGuard
 from fitagent.topics import TOPIC_CONTEXT_RULES, TopicRouter
 
 HISTORY_LIMIT = 50_000
@@ -25,6 +30,77 @@ class FitnessService:
         self.clock = clock or (lambda: datetime.now().astimezone())
         self.memory = FactMemory(store, client, self.clock)
         self.topics = TopicRouter(store, self.clock)
+        self.safety = SafetyGuard(store, client, lambda: self.clock())
+        self.actions = ChatActions(self)
+        self.onboarding = ChatOnboarding(self)
+
+    def next_check(self):
+        return next_check(self.clock())
+
+    def current_profile(self):
+        profile = self.store.latest("profiles")
+        if profile and profile.get("birth_date"):
+            profile["age"] = age_on(profile["birth_date"], self.clock().date())
+        return profile
+
+    def profile_text(self):
+        profile = self.current_profile()
+        if not profile:
+            return "Профиль ещё не заполнен. Ответьте на вопросы в чате."
+        goal = self.store.latest("goals") or {}
+        weight = (
+            f"{profile['weight']:g} кг"
+            if profile["weight"] is not None
+            else "не указан — сообщите в чате"
+        )
+        return (
+            f"Профиль (только чтение)\nДата рождения: {profile['birth_date']} · {profile['age']} лет\n"
+            f"Пол: {profile['sex']} · рост: {profile['height']:g} см\n"
+            f"Вес: {weight} · измерен {profile.get('measured_at') or 'дата не указана'}\n"
+            f"Цель: {goal.get('text', 'не задана')} · целевой вес: {goal.get('target') or 'не задан'}\n"
+            "Чтобы изменить данные, напишите об этом в чате. /memory — факты и журналы."
+        )
+
+    def profile_for_memory(self, memory):
+        profile = self.current_profile()
+        weights = [
+            fact
+            for fact in memory["facts"]
+            if fact["category"] == "measurements" and fact["key"].startswith("weight_")
+        ]
+        if weights:
+            newest = max(weights, key=lambda fact: (parse_stamp(fact["valid_from"]), fact["id"]))
+            profile.update(weight=newest["value"]["quantity"], measured_at=newest["valid_from"])
+        else:
+            profile.update(weight=None, measured_at=None)
+        return profile
+
+    def start_chat(self):
+        prompt = self.onboarding.start()
+        if prompt:
+            with self.store.connect() as db:
+                last = db.execute(
+                    "SELECT content FROM messages ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            if not last or last[0] != prompt:
+                self.store.message("assistant", prompt, self.clock(), "onboarding")
+                return prompt
+        return None
+
+    def chat(self, text):
+        text = text.strip()
+        if not text:
+            raise ValueError("Введите ответ или вопрос.")
+        if not self.current_profile() or self.onboarding.state() is not None:
+            response = self.onboarding.respond(text)
+            self.store.message("assistant", response, self.clock(), "onboarding")
+            return response
+        if text.startswith(("/confirm", "/cancel")):
+            response = self.actions.command(text)
+            self.store.message("user", text, self.clock(), "control")
+            self.store.message("assistant", response, self.clock(), "control")
+            return response
+        return self.answer(text)
 
     def audit(self, kind, details):
         self.store.event(kind, details, self.clock())
@@ -44,7 +120,7 @@ class FitnessService:
         self.audit("profile_deferred", {"retry": "in_1_day"})
 
     def save(self, profile, warning="", confirmed=False):
-        profile = validate_profile(**profile)
+        profile = validate_profile(**profile, now=self.clock())
         warning = warning or bmi_warning(profile)
         if warning and not confirmed:
             raise ValueError("Подтвердите рискованную цель или измените её.")
@@ -55,7 +131,7 @@ class FitnessService:
         if profile is not None:
             data = profile
         else:
-            data = {"profile": self.store.latest("profiles"), "goal": self.store.latest("goals")}
+            data = {"profile": self.current_profile(), "goal": self.store.latest("goals")}
         return SYSTEM_PROMPT + "\nПОЛНЫЕ ДАННЫЕ (JSON):\n" + json.dumps(data, ensure_ascii=False)
 
     def request(self, system, text, purpose, output=None):
@@ -67,10 +143,32 @@ class FitnessService:
             purpose,
         )
 
-    def assess_goal(self, profile):
+    def checked_goal_warning(self, profile, warning, memory=None, dialogue=None):
+        if not warning:
+            return warning
+        snapshot = memory if memory is not None else self.memory.repository.load(self.clock())
+        checked = self.safety.check(
+            "goal_response",
+            profile["goal"],
+            snapshot,
+            profile,
+            draft=warning,
+            changes=snapshot.get("operations"),
+            dialogue=dialogue,
+        )
+        if checked["status"] == "warning" and checked["description"] not in warning:
+            warning += "\nПредупреждение безопасности: " + checked["description"]
+        return warning
+
+    def assess_goal(self, profile, safety_result=None, memory=None, dialogue=None):
         warning = bmi_warning(profile)
         result = self.request(
-            self.system(profile),
+            self.system(profile)
+            + (
+                "\nРЕЗУЛЬТАТ БЕЗОПАСНОСТИ:\n" + json.dumps(safety_result, ensure_ascii=False)
+                if safety_result
+                else ""
+            ),
             "Оцени безопасность заявленной цели для параметров взрослого пользователя. "
             "Не считай отсутствие точного веса ошибкой. Учти целевой вес, срок и методы, "
             "включая числа в свободном тексте. Верни только JSON: "
@@ -89,7 +187,12 @@ class FitnessService:
                 "Модель не вернула корректную оценку цели. Повторите сохранение."
             ) from None
         self.audit("goal_assessment", {"bmi_warning": bool(warning), "model_warning": bool(value)})
-        return "\n\n".join(part for part in (warning, value.strip()) if part)
+        return self.checked_goal_warning(
+            profile,
+            "\n\n".join(part for part in (warning, value.strip()) if part),
+            memory=memory,
+            dialogue=dialogue,
+        )
 
     def summarize(self, source, system, purpose="summarization"):
         key = hashlib.sha256(
@@ -174,8 +277,8 @@ class FitnessService:
         question = question.strip()
         if not question:
             raise ValueError("Введите вопрос.")
-        if not self.store.latest("profiles") or not self.store.latest("goals"):
-            raise ValueError("Сначала заполните профиль и цель через /profile.")
+        if not self.current_profile():
+            raise ValueError("Сначала заполните профиль в чате.")
         system = self.system()
         message_id = self.store.message("user", question, self.clock(), "pending")
         try:
@@ -183,11 +286,27 @@ class FitnessService:
             self.memory.clock = self.clock
             self.topics.clock = self.clock
             memory = self.memory.prepare(message_id, question, topics=self.topics)
+            profile = self.profile_for_memory(memory)
+            goal = self.store.latest("goals")
+            system = self.system({"profile": profile, "goal": goal})
             plan = memory["dialogue"]
             self.topics.prepare_checkpoints(plan, system, self.summarize)
             history = self.topics.context(plan, system, self.compact)
+            safety_result = self.safety.check(
+                "request",
+                question,
+                memory,
+                profile,
+                changes=memory["operations"],
+                goal=goal,
+                dialogue=history,
+            )
+            self.actions.prepare(memory, question, safety_result, dialogue=history)
             fact_context = self.memory.context(
-                memory, topic_id=plan["topic_id"], related_topic_ids=plan["related_topic_ids"]
+                memory,
+                topic_id=plan["topic_id"],
+                related_topic_ids=plan["related_topic_ids"],
+                include_safety=False,
             )
             for checkpoint in plan["used_checkpoints"]:
                 self.audit("checkpoint_used", checkpoint)
@@ -196,12 +315,35 @@ class FitnessService:
                 self.audit("facts_read", {"fact_ids": [fact["id"] for fact in included_facts]})
             response = self.request(
                 system + "\n" + CONTEXT_RULES + "\n" + TOPIC_CONTEXT_RULES,
+                f"РЕЗУЛЬТАТ ПРОВЕРКИ БЕЗОПАСНОСТИ:\n{json.dumps(safety_result, ensure_ascii=False)}\n"
                 f"ЗАКРЕПЛЁННЫЕ ФАКТЫ (JSON):\n{fact_context}\n"
                 f"{history}\nТЕКУЩИЙ ВОПРОС:\n{question}",
                 "answer",
             )
-            self.memory.complete(memory, message_id, response)
-            return response
+            checked = self.safety.check(
+                "response",
+                question,
+                memory,
+                profile,
+                draft=response,
+                changes=memory["operations"],
+                goal=goal,
+                dialogue=history,
+            )
+            warnings = list(
+                dict.fromkeys(
+                    result["description"]
+                    for result in (safety_result, checked)
+                    if result["status"] == "warning"
+                )
+            )
+            if warnings:
+                response += "\n\nПредупреждение безопасности: " + " ".join(warnings)
+            if memory["notifications"]:
+                response += "\n\nПамять обновлена:\n" + "\n".join(
+                    "• " + item for item in memory["notifications"]
+                )
+            return self.memory.complete(memory, message_id, response)
         except Exception:
             self.store.set_status(message_id, "failed")
             self.audit("answer_failed", {"message_id": message_id})

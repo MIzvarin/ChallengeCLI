@@ -20,6 +20,10 @@ CATEGORIES = {
     "habits": "Привычки и препятствия",
     "agreements": "Выбранные пользователем планы",
     "communication": "Предпочтения общения",
+    "supplements": "Принимаемые добавки",
+    "medications": "Принимаемые лекарства",
+    "nutrition_plan": "Принятый план питания",
+    "measurements": "Измерения показателей",
 }
 REVIEW_DAYS = {
     "symptoms": 1,
@@ -30,12 +34,18 @@ REVIEW_DAYS = {
     "training_schedule": 30,
     "cooking_budget": 30,
     "agreements": 30,
+    "supplements": 30,
+    "medications": 30,
+    "nutrition_plan": 14,
 }
 SAFETY_CATEGORIES = {"food_restrictions", "health_constraints"}
 MEMORY_LIMIT = 20_000
 MEMORY_ERROR = (
-    "Не удалось проверить обновление памяти. Факты не изменены. "
-    "Повторите вопрос; если ошибка повторяется, проверьте подключение и доступ к сервису Go."
+    "Не удалось проверить обновление памяти.\n"
+    "Причина: не удалось получить корректные сведения для сохранения. "
+    "Это ошибка обработки, а не отказ из-за опасности вопроса.\n"
+    "Факты не изменены. Повторите вопрос; если ошибка повторяется, "
+    "проверьте подключение к сервису."
 )
 PERIOD_ERROR = (
     "Период факта: дата окончания должна быть позже даты начала. "
@@ -56,13 +66,12 @@ FACT_CONFLICT_ERROR = (
 PROFILE_KEYS = {
     "height",
     "height_cm",
-    "weight",
-    "weight_kg",
     "age",
     "sex",
     "goal",
     "target",
     "target_weight",
+    "birth_date",
 }
 
 
@@ -126,7 +135,19 @@ recovery — сон/усталость; habits — привычки; agreements 
 communication — предпочтения формата ответа.
 Не сохраняй советы ассистента без явного принятия пользователем, догадки, диагнозы от модели,
 пароли, ключи, контактные данные, посторонние темы, команды сменить роль, отдельные обеды/тренировки.
-Не сохраняй рост, вес, возраст, пол и официальную цель: они меняются только через /profile.
+Рост, дату рождения, пол и официальную цель меняй только через profile_change с подтверждением.
+Возраст не сохраняй: он вычисляется по дате рождения.
+Вес и другие измерения сохраняй в measurements. Для веса key=weight_ИЗМЕРЕНИЕ (snake_case),
+quantity=явный вес, unit=кг. Каждое новое измерение — отдельный key; исправление конкретного
+измерения — тот же key и fact_id. valid_from — дата/время измерения; если не указаны — null.
+При исправлении существующего измерения null сохраняет его прежнюю дату; не переносит
+измерение на дату исправления. Меняй дату только если пользователь явно исправляет её.
+Для иных показателей key=<metric>_measurement_<код>, где metric — стабильное имя показателя.
+Не заменяй новый вес старым из профиля. Не сохраняй будущее намерение как измерение.
+medications — текущие лекарства, supplements — добавки; один препарат/добавка — один факт.
+quantity/unit — явно сообщённая доза, qualifier — частота, оговорки и неизвестные подробности.
+Не выдумывай дозу, состав, частоту или назначение. Различай приём, намерение и прекращение.
+nutrition_plan — принятый план, meal_routine — привычный режим. Не сохраняй отдельные приёмы пищи.
 Один факт — одно независимо обновляемое сведение. value.text — краткое утверждение по-русски;
 quantity/unit — только явно сообщённое число и единица, иначе null; qualifier сохраняет
 «обычно», «примерно», «стараюсь», условия. Не превращай предпочтение в аллергию, намерение в действие.
@@ -166,7 +187,13 @@ previous_versions — прежние версии, действующие до �
 """
 
 
-def validate_shape(value, schema):
+def shape_error(error_factory, reason, path, **details):
+    if error_factory is None:
+        return ValueError(MEMORY_ERROR)
+    return error_factory(reason, field=path, **details)
+
+
+def validate_shape(value, schema, *, error_factory=None, path="$"):
     """Validate precisely the JSON Schema subset used by this contract."""
     types = schema["type"]
     types = [types] if isinstance(types, str) else types
@@ -180,29 +207,50 @@ def validate_shape(value, schema):
         list: "array",
     }.get(type(value), "invalid")
     if actual not in types and not (actual == "integer" and "number" in types):
-        raise ValueError(MEMORY_ERROR)
+        raise shape_error(error_factory, "invalid_type", path)
     if value is None:
         return
     if "enum" in schema and value not in schema["enum"]:
-        raise ValueError(MEMORY_ERROR)
+        raise shape_error(error_factory, "invalid_enum", path)
     if actual == "object":
         if set(value) != set(schema["properties"]):
-            raise ValueError(MEMORY_ERROR)
+            raise shape_error(
+                error_factory,
+                "invalid_fields",
+                path,
+                missing_count=len(set(schema["properties"]) - set(value)),
+                extra_count=len(set(value) - set(schema["properties"])),
+            )
         for key, child in schema["properties"].items():
-            validate_shape(value[key], child)
+            validate_shape(value[key], child, error_factory=error_factory, path=f"{path}.{key}")
     elif actual == "array":
-        if len(value) > schema.get("maxItems", 100):
-            raise ValueError(MEMORY_ERROR)
-        for item in value:
-            validate_shape(item, schema["items"])
+        if len(value) > schema.get("maxItems", math.inf):
+            raise shape_error(
+                error_factory,
+                "invalid_length",
+                path,
+                actual_length=len(value),
+                maximum_length=schema["maxItems"],
+            )
+        for index, item in enumerate(value):
+            validate_shape(
+                item, schema["items"], error_factory=error_factory, path=f"{path}[{index}]"
+            )
     elif actual == "string":
         if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", 1000):
-            raise ValueError(MEMORY_ERROR)
+            raise shape_error(
+                error_factory,
+                "invalid_length",
+                path,
+                actual_length=len(value),
+                minimum_length=schema.get("minLength", 0),
+                maximum_length=schema.get("maxLength", 1000),
+            )
         if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
-            raise ValueError(MEMORY_ERROR)
+            raise shape_error(error_factory, "invalid_pattern", path)
     elif actual in {"integer", "number"}:
         if not math.isfinite(value) or value < schema.get("minimum", -math.inf):
-            raise ValueError(MEMORY_ERROR)
+            raise shape_error(error_factory, "invalid_number", path)
 
 
 def unique_object(pairs):
@@ -291,6 +339,18 @@ def parse_extraction(text, question, facts, now, previous_versions=()):
             identities.add(key)
             if operation["key"] in PROFILE_KEYS:
                 raise ValueError
+            if operation["category"] == "measurements":
+                if operation["applicability"] != "global" or operation["topic_id"] is not None:
+                    raise ValueError
+                if operation["value"]["quantity"] is None:
+                    raise ValueError
+                if (parse_stamp(operation["valid_from"]) or now) > now:
+                    raise ValueError
+                if operation["key"].startswith("weight_") and (
+                    not 25 <= operation["value"]["quantity"] <= 400
+                    or operation["value"]["unit"] != "кг"
+                ):
+                    raise ValueError
             if operation["source_quote"] not in question:
                 raise ValueError
             target = resolve_fact(operation, facts, previous_versions, now)
@@ -324,6 +384,8 @@ def parse_extraction(text, question, facts, now, previous_versions=()):
             if end is not None and end <= start:
                 raise ValueError
             if operation["category"] in SAFETY_CATEGORIES and end is not None:
+                raise ValueError
+            if operation["category"] in SAFETY_CATEGORIES and start > now:
                 raise ValueError
             validate_update_mode(operation, target, now)
         return data["operations"]

@@ -5,6 +5,7 @@ from datetime import datetime
 from itertools import groupby
 
 from fitagent.memory_schema import parse_stamp
+from fitagent.state_storage import journal
 from fitagent.topic_storage import write_topic_turn
 
 FACT_COLUMNS = (
@@ -172,8 +173,10 @@ class FactRepository:
         """Only the immediately preceding completed turn, never a bulk archive export."""
         with self.store.connect() as db:
             rows = db.execute(
-                "SELECT id,role,content,created_at FROM messages WHERE id<? "
-                "AND status='complete' ORDER BY id DESC LIMIT 2",
+                "SELECT m.id,m.role,m.content,m.created_at FROM messages m "
+                "LEFT JOIN topic_messages tm ON tm.message_id=m.id LEFT JOIN topics t ON t.id=tm.topic_id "
+                "WHERE m.id<? AND m.status='complete' AND (tm.topic_id IS NULL OR t.closed_at IS NULL) "
+                "ORDER BY m.id DESC LIMIT 2",
                 (before_id,),
             ).fetchall()
         # Do not send an unexpectedly large old message for a short contextual reference.
@@ -207,6 +210,11 @@ class FactRepository:
             or (int(revision[0]) if revision else 0) != snapshot["revision"]
         ):
             raise ValueError("Память изменена другим запросом. Повторите вопрос.")
+        if snapshot.get("consume_action"):
+            if not db.execute(
+                "DELETE FROM pending_actions WHERE id=?", (snapshot["consume_action"],)
+            ).rowcount:
+                raise ValueError("Предложение уже обработано. Сформулируйте изменение заново.")
         for fact_id, status, superseded_at in snapshot["retired"]:
             db.execute(
                 "UPDATE sticky_facts SET status=?,superseded_at=? WHERE id=?",
@@ -268,6 +276,17 @@ class FactRepository:
             "INSERT OR REPLACE INTO settings VALUES ('memory_revision',?)",
             (str(snapshot["revision"] + 1),),
         )
+        for lineage, effective, action, old, new, message in snapshot.get("journal", []):
+            journal(
+                db,
+                lineage,
+                snapshot.get("recorded_at", effective),
+                effective,
+                action,
+                old,
+                new,
+                message,
+            )
 
     def complete(self, snapshot, message_id, response, now):
         with self.store.connect() as db:
@@ -279,6 +298,12 @@ class FactRepository:
             if not source or source["role"] != "user" or source["status"] != "pending":
                 raise ValueError("Вопрос уже обработан или удалён. Отправьте новый вопрос.")
             self._write(db, snapshot)
+            from fitagent.chat_actions import ChatActions, write_actions
+
+            write_actions(db, snapshot, now)
+            proposals = ChatActions.describe_proposals(snapshot)
+            if proposals:
+                response += "\n\n" + proposals
             db.execute("INSERT INTO memory_turns VALUES (?)", (message_id,))
             assistant = db.execute(
                 "INSERT INTO messages(day,created_at,role,content,status) VALUES (?,?,'assistant',?,'complete')",
@@ -300,6 +325,7 @@ class FactRepository:
                     ),
                 ),
             )
+        return response
 
     def delete(self, fact_id):
         with self.store.connect() as db:
@@ -325,6 +351,7 @@ class FactRepository:
                 "DELETE FROM sticky_facts WHERE lineage_id=?",
                 (row["lineage_id"],),
             )
+            db.execute("DELETE FROM memory_journal WHERE lineage_id=?", (row["lineage_id"],))
             db.execute(
                 "DELETE FROM memory_issues WHERE category=? AND fact_key=? AND scope=? "
                 "AND applicability=? AND topic_id IS ?",
@@ -339,3 +366,29 @@ class FactRepository:
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._write(db, snapshot)
+
+    def history(self, fact_id):
+        with self.store.connect() as db:
+            row = db.execute(
+                "SELECT lineage_id FROM sticky_facts WHERE id=?", (fact_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("Факт не найден. Посмотрите номера через /memory.")
+            rows = db.execute(
+                "SELECT * FROM memory_journal WHERE lineage_id=? ORDER BY id", (row[0],)
+            ).fetchall()
+        return "Журнал изменений:\n" + "\n".join(
+            f"{r['recorded_at']} · действует с {r['effective_at']} · {r['action']} · "
+            f"{r['old_value'] or 'не было'} → {r['new_value'] or 'отозвано'}"
+            for r in rows
+        )
+
+    def archives(self):
+        with self.store.connect() as db:
+            rows = db.execute("SELECT * FROM memory_archives ORDER BY id").fetchall()
+        return "Архив среднесрочной памяти:\n" + (
+            "\n".join(
+                f"№{r['id']} · цель №{r['goal_id']} · {r['created_at']}\n{r['facts']}" for r in rows
+            )
+            or "Архив пока пуст."
+        )

@@ -11,7 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
-from textual.widgets import Button, Input, RichLog, Static
+from support import EMPTY_TURN, safe_response
+from textual.widgets import Input, RichLog, Static
 
 from fitagent.domain import SYSTEM_PROMPT, bmi_warning, token_bound, validate_profile
 from fitagent.loader import ResponseLoader
@@ -19,24 +20,30 @@ from fitagent.logs import LogsPanel
 from fitagent.provider import ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
-from fitagent.ui import FitAgentApp, ProfileScreen, RiskScreen
+from fitagent.ui import FitAgentApp
 
 NOW = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
 
 
 def profile(**changes):
-    values = dict(height=180, weight=80, sex="мужской", age=30, goal="Стать сильнее", target="")
+    values = dict(
+        height=180,
+        weight=80,
+        sex="мужской",
+        birth_date="1996-01-01",
+        goal="Стать сильнее",
+        target="",
+    )
     values.update(changes)
-    return validate_profile(**values)
+    return validate_profile(**values, now=NOW)
 
 
 def fixture(directory, generate=None):
     store = Storage(directory)
     client = SimpleNamespace(
         model="deepseek-v4.1-flash",
-        generate_structured=Mock(
-            return_value='{"operations":[],"topic":{"action":"continue","topic_id":null,"title":"","related_topic_ids":[],"clarification":null}}'
-        ),
+        generate_structured=Mock(return_value=EMPTY_TURN),
+        generate_safety=Mock(side_effect=safe_response),
         generate=Mock(
             side_effect=generate
             or (
@@ -63,12 +70,12 @@ def test_profile_and_goal_validation():
     assert not bmi_warning(profile(target=75))
     assert "15.4" in bmi_warning(profile(target=50))
     for change in (
-        {"age": 17},
+        {"birth_date": "2010-01-01"},
         {"weight": "nan"},
         {"height": "inf"},
         {"goal": " "},
         {"target": "nan"},
-        {"age": "18.5"},
+        {"birth_date": "1996-02-30"},
     ):
         expect_error(lambda: profile(**change))
 
@@ -77,7 +84,6 @@ def test_numeric_validation_messages():
     for field, label in (
         ("height", "Рост"),
         ("weight", "Вес"),
-        ("age", "Возраст"),
         ("target", "Целевой вес"),
     ):
         for value in ("abc", " "):
@@ -339,52 +345,35 @@ async def tui_flow():
         app = FitAgentApp(service)
         async with app.run_test(size=(110, 45)) as pilot:
             await pilot.pause()
-            assert isinstance(app.screen, ProfileScreen)
-            for name, value in dict(
-                height="180",
-                weight="80",
-                sex="мужской",
-                age="30",
-                goal="Стать сильнее",
-                target="50",
-            ).items():
-                app.screen.query_one(f"#{name}", Input).value = value
-            app.screen.query_one("#save", Button).scroll_visible(animate=False)
-            await pilot.pause()
-            await pilot.click("#save")
-            for _ in range(20):
-                await pilot.pause()
-                if isinstance(app.screen, RiskScreen):
-                    break
-            assert isinstance(app.screen, RiskScreen)
-            assert store.latest("goals") is None
-            await pilot.click("#edit")
-            await app.workers.wait_for_complete()
-            assert isinstance(app.screen, ProfileScreen)
-            app.screen.query_one("#target", Input).value = "75"
-            app.screen.query_one("#save", Button).scroll_visible(animate=False)
-            await pilot.pause()
-            await pilot.click("#save")
-            await app.workers.wait_for_complete()
-            assert store.latest("goals")["target"] == 75
             assert len(app.screen_stack) == 1
-            app.action_profile()
-            await pilot.pause()
-            app.screen.query_one("#target", Input).value = "50"
-            app.screen.query_one("#save", Button).scroll_visible(animate=False)
-            await pilot.pause()
-            await pilot.click("#save")
-            for _ in range(20):
-                await pilot.pause()
-                if isinstance(app.screen, RiskScreen):
-                    break
-            assert isinstance(app.screen, RiskScreen)
-            await pilot.click("#confirm")
+            field = app.query_one("#question", Input)
+            for answer in (
+                "1996-01-01",
+                "180",
+                "80",
+                "мужской",
+                "Стать сильнее",
+                "50",
+                "нет",
+                "нет",
+                "нет",
+                "нет",
+                "нет",
+                "нет",
+            ):
+                field.value = answer
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+            assert store.latest("profiles") is None
+            assert "подтверждаю" in "\n".join(
+                line.text for line in app.query_one("#chat", RichLog).lines
+            )
+            field.value = "подтверждаю"
+            await pilot.press("enter")
             await app.workers.wait_for_complete()
             assert store.latest("goals")["target"] == 50
             assert store.latest("goals")["risk_confirmed"] == 1
-            with store.connect() as db:
-                assert db.execute("SELECT COUNT(*) FROM goals").fetchone()[0] == 2
+            assert len(app.screen_stack) == 1
 
 
 async def tui_commands():
@@ -410,11 +399,7 @@ async def tui_commands():
             assert "assistant: Ответ" in "\n".join(store.history(NOW.isoformat()))
             app.action_profile()
             await pilot.pause()
-            assert isinstance(app.screen, ProfileScreen)
-            app.screen.query_one("#later", Button).scroll_visible(animate=False)
-            await pilot.pause()
-            await pilot.click("#later")
-            assert not service.due()
+            assert len(app.screen_stack) == 1
             assert app.query_one("#profile-bar", Static)
             app.action_profile()
             await pilot.pause()
@@ -467,31 +452,17 @@ async def tui_form_errors():
         app = FitAgentApp(service)
         async with app.run_test(size=(110, 45)) as pilot:
             await pilot.pause()
-            screen = app.screen
-            screen.query_one("#save", Button).scroll_visible(animate=False)
-            await pilot.pause()
-            await pilot.click("#save")
+            field = app.query_one("#question", Input)
+            field.value = "не дата"
+            await pilot.press("enter")
             await app.workers.wait_for_complete()
-            assert (
-                str(screen.query_one("#form-error", Static).renderable) == "Заполните поле «Рост»."
-            )
-            assert not client.generate.called
-            assert store.latest("profiles") is None
-            assert not screen.query_one("#save", Button).disabled
-            assert screen.query_one("#later", Button).disabled
-            for name, value in profile().items():
-                screen.query_one(f"#{name}", Input).value = str(value) if value is not None else ""
-            client.generate.side_effect = OSError("SECRET technical failure")
-            screen.query_one("#save", Button).scroll_visible(animate=False)
-            await pilot.pause(0.25)  # Let Textual's button press animation finish.
-            await pilot.click("#save")
-            await app.workers.wait_for_complete()
-            message = str(screen.query_one("#form-error", Static).renderable)
-            assert "Не удалось сохранить профиль" in message, message
+            message = "\n".join(line.text for line in app.query_one("#chat", RichLog).lines)
+            assert "ГГГГ-ММ-ДД" in message
             assert "SECRET" not in message
             assert "SECRET" not in store.logs()
-            assert screen.query_one("#height", Input).value == "180.0"
-            assert not screen.query_one("#save", Button).disabled
+            assert not field.disabled
+            assert store.latest("profiles") is None
+            client.generate.assert_not_called()
 
 
 async def tui_response_loader():
