@@ -34,7 +34,10 @@ class SafetyGuard:
         previous_snapshot=None,
         goal=None,
         dialogue=None,
+        report_only=False,
     ):
+        if report_only and stage not in {"goal_plan", "onboarding", "goal_proposal"}:
+            raise ValueError("Нельзя отключить блокировку для этой проверки безопасности.")
         rules = safety_rules(snapshot, self.clock())
         previous_rules = safety_rules(previous_snapshot, self.clock()) if previous_snapshot else []
         proposed_rules = [
@@ -46,6 +49,11 @@ class SafetyGuard:
             for index, operation in enumerate(changes if isinstance(changes, list) else [])
             if operation["category"] in SAFETY_CATEGORIES and operation["action"] == "upsert"
         ]
+        required_rules = list(
+            dict.fromkeys(
+                ["system", *(rule["rule_id"] for rule in rules + previous_rules + proposed_rules)]
+            )
+        )
         payload = {
             "stage": stage,
             "question": question,
@@ -65,6 +73,7 @@ class SafetyGuard:
             "previous_rules": previous_rules,
             "proposed_rules": proposed_rules,
             "context": inventory_facts(snapshot["facts"]),
+            "required_rule_ids": required_rules,
         }
         phase = "service_response"
         try:
@@ -78,7 +87,8 @@ class SafetyGuard:
             phase = "contract"
             result = parse_safety(
                 raw,
-                ["system", *(rule["rule_id"] for rule in rules + previous_rules + proposed_rules)],
+                required_rules,
+                exact=True,
             )
         except Exception as exc:
             details = {
@@ -95,7 +105,7 @@ class SafetyGuard:
             "safety_checked", {"stage": stage, "status": result["status"]}, self.clock()
         )
         public = {key: result[key] for key in ("status", "description")}
-        if public["status"] == "block":
+        if public["status"] == "block" and not report_only:
             action = {
                 "onboarding": "Не могу сохранить профиль с такими данными.",
                 "changes": "Не могу сохранить это изменение.",

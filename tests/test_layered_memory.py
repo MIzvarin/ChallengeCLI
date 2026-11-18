@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 
-from support import EMPTY_TURN
+from support import EMPTY_TURN, seed_accepted_goal
 from test_fitagent import NOW, fixture, profile
 from test_memory import error, extract, operation
 
@@ -71,7 +71,7 @@ def test_first_start_is_resumable_stepwise_chat_and_saves_all_required_categorie
             if f["category"] in {"supplements", "medications"}
         )
         assert reopened.onboarding.state() is None
-        assert reopened.start_chat() is None
+        assert "1/4" in reopened.start_chat()
         with store.connect() as db:
             assert db.execute("SELECT COUNT(*) FROM fact_sources").fetchone()[0] == 7
             assert db.execute("SELECT COUNT(*) FROM memory_journal").fetchone()[0] == 7
@@ -157,7 +157,10 @@ def test_profile_goal_change_is_proposed_checked_and_confirmed_without_fake_weig
         service.chat("/confirm 1")
         assert store.latest("goals")["text"] == "Бегать 5 км"
         assert len(store.weights()) == 1
-        assert len(client.generate_safety.call_args_list) == 4
+        assert [call.args[1] for call in client.generate_safety.call_args_list] == [
+            "goal_proposal",
+            "goal_proposal",
+        ]
         assert "/confirm 1" in store.chat_messages()[-3]["content"]
 
 
@@ -199,6 +202,7 @@ def test_task_completion_requires_confirmation_and_closed_memory_never_returns()
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(profile())
+        seed_accepted_goal(service)
         service.answer("PRIVATE_TASK_CONTENT")
         turn(client, completion="task")
         assert "/confirm 1" in service.answer("Задача решена")
@@ -226,6 +230,7 @@ def test_goal_completion_archives_medium_memory_but_preserves_current_data_and_i
         ]
         extract(client, *items)
         service.answer("; ".join(item["source_quote"] for item in items))
+        seed_accepted_goal(service)
         turn(client, completion="goal")
         service.answer("Цель достигнута")
         assert store.latest("goals") is not None
@@ -237,6 +242,9 @@ def test_goal_completion_archives_medium_memory_but_preserves_current_data_and_i
             "meal_routine",
             "medications",
             "food_restrictions",
+            "food_preferences",
+            "supplements",
+            "training_routine",
         }
         assert len(store.weights()) == 1
         assert "PRIVATE_PLAN" in service.memory.command("/memory archive")
@@ -272,22 +280,24 @@ def test_onboarding_measurement_keeps_the_answer_date_not_the_later_save_date():
             assert record["effective_at"] == NOW.isoformat()
 
 
-def test_onboarding_corrections_reset_risk_confirmation_and_do_not_skip_questions():
+def test_onboarding_corrections_do_not_skip_questions_or_authorize_risky_plan():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.start_chat()
         answers = list(ANSWERS)
         answers[5] = "50"
-        for answer in answers:
-            response = service.chat(answer)
-        assert "подтверждаю" in response
+        for answer in answers[:-1]:
+            service.chat(answer)
         assert store.latest("profiles") is None
         response = service.chat("аллергии: нет")
-        assert "подтверждаю" in response
+        assert "программа тренировок" in response
+        assert service.onboarding.state()["answers"]["allergies"] == "нет"
         assert store.latest("profiles") is None
-        service.chat("подтверждаю")
+        service.chat(answers[-1])
         assert store.latest("profiles") is not None
         assert service.onboarding.state() is None
+        assert service.workflow.state()["stage"] == "planning"
+        assert not store.latest("goals")["risk_confirmed"]
 
 
 def test_revoking_the_last_measurement_does_not_resurrect_the_profile_copy():

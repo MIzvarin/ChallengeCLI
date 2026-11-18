@@ -10,7 +10,7 @@ from unittest.mock import Mock
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from support import EMPTY_TURN, safe_response
+from support import EMPTY_TURN, allow_goal_continue, safe_response, seed_accepted_goal
 from textual.widgets import Input, RichLog
 
 from fitagent.chat import write_message
@@ -68,6 +68,8 @@ async def framed_chat_flow():
             )
             service = FitnessService(store, client, clock=lambda: NOW)
             service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
+            seed_accepted_goal(service)
+            allow_goal_continue(client)
             store.message("user", "Старый вопрос", NOW)
             store.message("assistant", "**Старый ответ**", NOW)
             app = FitAgentApp(service)
@@ -75,7 +77,7 @@ async def framed_chat_flow():
                 await pilot.pause()
                 chat = app.query_one("#chat", RichLog)
                 text = "\n".join(line.text for line in chat.lines)
-                assert text.count("╭") == text.count("╯") == 2
+                assert text.count("╭") == text.count("╯") == 3
                 assert "Старый вопрос" in text and "Старый ответ" in text
                 assert "**Старый ответ**" not in text
                 assert not client.generate.called
@@ -84,7 +86,7 @@ async def framed_chat_flow():
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 text = "\n".join(line.text for line in chat.lines)
-                assert text.count("╭") == text.count("╯") == 4
+                assert text.count("╭") == text.count("╯") == 5
                 assert "Новый вопрос" in text and "Новый ответ" in text
                 assert "**Новый ответ**" not in text
                 assert chat.virtual_size.width <= chat.scrollable_content_region.width

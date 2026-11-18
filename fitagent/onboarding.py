@@ -2,7 +2,8 @@
 
 import json
 
-from fitagent.domain import profile_number, validate_birth_date, validate_profile
+from fitagent.domain import bmi_warning, profile_number, validate_birth_date, validate_profile
+from fitagent.goal_state import initial_state
 from fitagent.memory import project
 
 QUESTIONS = (
@@ -173,9 +174,6 @@ class ChatOnboarding:
             state.pop("warning_shown", None)
         else:
             name = next((key for key, _ in QUESTIONS if key not in answers), None)
-        risk_confirmed = (
-            name is None and text.casefold() == "подтверждаю" and state.get("warning_shown", False)
-        )
         if name is not None:
             value = self.validate_answer(name, text)
             source = self.store.message("user", original, self.service.clock(), "onboarding")
@@ -194,42 +192,29 @@ class ChatOnboarding:
             now=self.service.clock(),
         )
         memory = self.candidate(state)
-        result = self.service.safety.check("onboarding", answers["goal"], memory, profile)
-        warning = state.get("warning")
-        if warning is None:
-            warning = self.service.assess_goal(profile, safety_result=result, memory=memory)
-            state["warning"] = warning
-            self.write_state(state)
-        else:
-            checked_warning = self.service.checked_goal_warning(profile, warning, memory=memory)
-            if checked_warning != warning:
-                warning = checked_warning
-                state["warning"] = warning
-                self.write_state(state)
-        if warning and not risk_confirmed:
-            state["warning_shown"] = True
-            self.write_state(state)
-            return (
-                warning
-                + "\nПодтверждение не делает цель безопасной. Напишите «подтверждаю» или «цель: новая цель»."
-            )
+        result = self.service.safety.check(
+            "onboarding", answers["goal"], memory, profile, report_only=True
+        )
+        warning = bmi_warning(profile)
         self.store.save_profile(
             profile,
             self.service.clock(),
             self.service.next_check(),
             warning,
-            bool(warning),
+            False,
             memory=memory,
             setup_done=True,
         )
         notice = (
             "\nПредупреждение безопасности: " + result["description"]
-            if result["status"] == "warning"
+            if result["status"] != "allow"
             else ""
         )
         if warning:
             notice += "\nПроверка цели: " + warning
         return (
-            "Профиль и ответы сохранены. Память обновлена: ограничения, предпочтения, режим, добавки, лекарства, тренировки и измерение веса. /profile — просмотр. Теперь можно задать вопрос."
+            "Профиль и ответы сохранены. Память обновлена: ограничения, предпочтения, режим, добавки, лекарства, тренировки и измерение веса. /profile — просмотр. Цель записана как желаемая, выполнение ещё не разрешено."
             + notice
+            + "\n\n"
+            + self.service.workflow.describe(initial_state(self.store.latest("goals")["id"]))
         )

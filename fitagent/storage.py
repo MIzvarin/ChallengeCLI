@@ -128,6 +128,12 @@ class Storage:
                     "VALUES (?,?,?,?,?)",
                     (profile["goal"], profile["target"], stamp, warning, int(confirmed)),
                 )
+            from fitagent.goal_state import invalidate_goal
+
+            active = db.execute(
+                "SELECT id FROM goals WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            invalidate_goal(db, active[0])
             db.execute(
                 "INSERT INTO changes(day,created_at,kind,data) VALUES (?,?,?,?)",
                 (now.date().isoformat(), stamp, "profile_confirmed", json.dumps(profile)),

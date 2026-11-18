@@ -1,10 +1,11 @@
 """Readable refusals distinguish a known risk from a failed check. No external API."""
 
 import asyncio
+import json
 import tempfile
 import unittest
 
-from support import safe_response, safety_json
+from support import allow_goal_continue, safe_response, safety_json, seed_accepted_goal
 from test_memory import error, fixture
 from textual.widgets import Input, RichLog
 
@@ -104,7 +105,17 @@ def test_warning_still_returns_an_answer_instead_of_a_refusal():
 async def readable_refusal_flow():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
-        block(client)
+        seed_accepted_goal(service)
+        allow_goal_continue(client)
+
+        def blocked(messages, stage):
+            value = json.loads(safe_response(messages, stage))
+            value.update(status="block", description=REASON)
+            for check in value["checks"]:
+                check["status"] = "block"
+            return json.dumps(value)
+
+        client.generate_safety.side_effect = blocked
         app = FitAgentApp(service)
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()

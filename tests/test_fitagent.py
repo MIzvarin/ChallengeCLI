@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
-from support import EMPTY_TURN, safe_response
+from support import EMPTY_TURN, allow_goal_continue, safe_response, seed_accepted_goal
 from textual.widgets import Input, RichLog, Static
 
 from fitagent.domain import SYSTEM_PROMPT, bmi_warning, token_bound, validate_profile
@@ -340,6 +340,8 @@ def test_transport_and_cache_metrics():
 
 
 async def tui_flow():
+    from test_goal_workflow import configure
+
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         app = FitAgentApp(service)
@@ -364,11 +366,17 @@ async def tui_flow():
                 field.value = answer
                 await pilot.press("enter")
                 await app.workers.wait_for_complete()
-            assert store.latest("profiles") is None
+            assert store.latest("profiles") is not None
+            assert service.workflow.state()["stage"] == "planning"
+            configure(client)
+            field.value = "продолжить"
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            assert service.workflow.state()["stage"] == "validation"
             assert "подтверждаю" in "\n".join(
                 line.text for line in app.query_one("#chat", RichLog).lines
             )
-            field.value = "подтверждаю"
+            field.value = "подтверждаю план"
             await pilot.press("enter")
             await app.workers.wait_for_complete()
             assert store.latest("goals")["target"] == 50
@@ -380,6 +388,8 @@ async def tui_commands():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(profile())
+        seed_accepted_goal(service)
+        allow_goal_continue(client)
         app = FitAgentApp(service)
         async with app.run_test(size=(100, 35)) as pilot:
             await pilot.pause()
@@ -421,6 +431,7 @@ async def tui_exit_command():
             app = FitAgentApp(service)
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
+                saved_messages = store.chat_messages()
                 field = app.query_one("#question", Input)
                 assert "/exit" in str(app.query_one("#status", Static).renderable)
                 field.value = "/help"
@@ -479,6 +490,8 @@ async def tui_response_loader():
         with tempfile.TemporaryDirectory() as directory:
             store, client, service = fixture(directory, generate=generate)
             service.save(profile())
+            seed_accepted_goal(service)
+            allow_goal_continue(client)
             app = FitAgentApp(service)
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()

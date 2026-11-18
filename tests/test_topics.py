@@ -595,8 +595,12 @@ def test_legacy_fact_migration_preserves_values_sources_and_clarifications():
 
 
 async def topic_ui_flow():
+    from support import allow_goal_continue, seed_accepted_goal
+
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
+        seed_accepted_goal(service)
+        allow_goal_continue(client)
         route(client, title="Меню")
         service.answer("Меню")
         menu = active(service)

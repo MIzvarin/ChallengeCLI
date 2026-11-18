@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from support import EMPTY_TURN, safe_response
+from support import EMPTY_TURN, allow_goal_continue, safe_response, seed_accepted_goal
 from textual.widgets import Input, RichLog
 
 from fitagent.domain import validate_profile
@@ -39,6 +39,8 @@ def test_chat_messages_include_all_dates_and_statuses():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
+        seed_accepted_goal(service)
+        allow_goal_continue(client)
         for role, content, stamp, status in (
             ("user", "Старый вопрос", NOW - timedelta(days=30), "complete"),
             ("assistant", "Старый ответ", NOW - timedelta(days=30), "complete"),
@@ -69,6 +71,8 @@ async def restart_flow():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(validate_profile(180, 80, "мужской", "1996-01-01", "Стать сильнее", ""))
+        seed_accepted_goal(service)
+        allow_goal_continue(client)
         store.message("user", "Старый вопрос", NOW - timedelta(days=8))
         store.message("assistant", "**Старый ответ**", NOW - timedelta(days=8))
         store.message("user", "Неудачный вопрос", NOW, "failed")
@@ -87,6 +91,7 @@ async def restart_flow():
             await app.workers.wait_for_complete()
 
         reopened, new_client, new_service = fixture(directory)
+        allow_goal_continue(new_client)
         app = FitAgentApp(new_service)
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -102,7 +107,7 @@ async def restart_flow():
             positions = [text.index(content) for content in expected]
             assert positions == sorted(positions)
             assert all(text.count(content) == 1 for content in expected)
-            assert len(reopened.chat_messages()) == 6
+            assert len(reopened.chat_messages()) == 8  # Both openings also ask about progress.
             assert not new_client.generate.called
             app.query_one("#question", Input).value = "Продолжение"
             await pilot.press("enter")

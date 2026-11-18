@@ -36,10 +36,10 @@ def test_only_warning_block_and_failures_are_displayed_with_safe_russian_stages(
         store = Storage(directory)
         check_events(store)
         public = store.activity_logs()
-        assert len(public.splitlines()) == 16
-        assert public.count("· предупреждение") == 5
-        assert public.count("· заблокировано") == 5
-        assert public.count("Ошибка проверки безопасности") == 5
+        assert len(public.splitlines()) == len(SAFETY_STAGES) * 3 + 1
+        assert public.count("· предупреждение") == len(SAFETY_STAGES)
+        assert public.count("· заблокировано") == len(SAFETY_STAGES)
+        assert public.count("Ошибка проверки безопасности") == len(SAFETY_STAGES)
         assert public.count("Ошибка проверки памяти") == 1
         assert all(stage in public for stage in SAFETY_STAGES.values())
         assert "факты не изменены; повторите запрос" in public

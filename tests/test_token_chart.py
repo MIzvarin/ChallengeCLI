@@ -192,7 +192,7 @@ async def chart_screen_flow():
                 await pilot.click("#close-tokens")
                 await pilot.pause()
                 assert app.screen is root
-                assert store.chat_messages() == []
+                assert len(store.chat_messages()) == 1  # Opening starts the goal pipeline, no API.
                 client.generate.assert_not_called()
 
 

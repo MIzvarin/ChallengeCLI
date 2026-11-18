@@ -10,6 +10,7 @@ from textual.containers import Vertical
 from textual.widgets import Footer, Input, RichLog, Static
 
 from fitagent.chat import write_message, write_topic_notice
+from fitagent.goal_state import LABELS
 from fitagent.loader import ResponseLoader
 from fitagent.logs import LogsPanel
 from fitagent.token_chart import TokensScreen
@@ -143,6 +144,9 @@ class FitAgentApp(App):
                 f"{profile['height']:g} см · {weight} · {profile['age']} лет\n"
                 f"Цель: {goal['text'] if goal else 'не задана'} · целевой вес: {goal['target'] or 'не задан' if goal else 'не задан'}"
             )
+            state = self.service.workflow.state(goal) if goal else None
+            if state:
+                text += "\n" + LABELS[state["stage"]]
         self.query_one("#profile-bar", Static).update(text)
 
     def check_reminder(self):
@@ -248,6 +252,9 @@ class FitAgentApp(App):
                 "Ограничения, лекарства, добавки и измерения исправляйте в чате для проверки безопасности.\n"
                 "/memory history НОМЕР — журнал; /memory archive — архив целей.\n"
                 "/confirm НОМЕР — подтвердить предложение; /cancel НОМЕР — отменить.\n"
+                "Цель: планирование → валидация → выполнение → готово; назад только с выполнения на валидацию.\n"
+                "«Подтверждаю план» — принять проверенный план и предупреждение. Опасность требует корректировки.\n"
+                "При каждом открытии на этапе выполнения спрашиваем о прогрессе.\n"
                 "/tokens — график накопленного расхода токенов; Escape — вернуться в чат.\n"
                 "/exit или Ctrl+Q — закрыть приложение без удаления сохранённых данных.\n"
                 "/logs или Ctrl+L — показать/скрыть нижнюю панель логов и токенов. "

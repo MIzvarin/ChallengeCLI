@@ -14,6 +14,7 @@ from fitagent.domain import (
     token_bound,
     validate_profile,
 )
+from fitagent.goal_workflow import ACCEPT_PLAN, GoalWorkflow
 from fitagent.memory import CONTEXT_RULES, FactMemory
 from fitagent.memory_schema import parse_stamp
 from fitagent.onboarding import ChatOnboarding
@@ -31,6 +32,7 @@ class FitnessService:
         self.memory = FactMemory(store, client, self.clock)
         self.topics = TopicRouter(store, self.clock)
         self.safety = SafetyGuard(store, client, lambda: self.clock())
+        self.workflow = GoalWorkflow(self)
         self.actions = ChatActions(self)
         self.onboarding = ChatOnboarding(self)
 
@@ -85,6 +87,8 @@ class FitnessService:
             if not last or last[0] != prompt:
                 self.store.message("assistant", prompt, self.clock(), "onboarding")
                 return prompt
+        else:
+            return self.workflow.opening()
         return None
 
     def chat(self, text):
@@ -100,7 +104,9 @@ class FitnessService:
             self.store.message("user", text, self.clock(), "control")
             self.store.message("assistant", response, self.clock(), "control")
             return response
-        return self.answer(text)
+        if text.casefold() == ACCEPT_PLAN:
+            return self.workflow.confirm(text)
+        return self.answer(text, manage_goal=True)
 
     def audit(self, kind, details):
         self.store.event(kind, details, self.clock())
@@ -273,7 +279,7 @@ class FitnessService:
         )
         return compacted
 
-    def answer(self, question):
+    def answer(self, question, *, manage_goal=False):
         question = question.strip()
         if not question:
             raise ValueError("Введите вопрос.")
@@ -292,6 +298,16 @@ class FitnessService:
             plan = memory["dialogue"]
             self.topics.prepare_checkpoints(plan, system, self.summarize)
             history = self.topics.context(plan, system, self.compact)
+            if manage_goal:
+                memory["goal_managed"] = True
+                response = self.workflow.handle(goal, question, memory, profile, history)
+                if response is not None:
+                    self.actions.prepare(memory, question, dialogue=history)
+                    return self.workflow.complete(memory, message_id, response)
+                system += self.workflow.context(goal)
+                if goal:
+                    state = self.workflow.state(goal)
+                    goal = dict(goal, plan=state["plan"], criterion=state["criterion"])
             safety_result = self.safety.check(
                 "request",
                 question,
@@ -301,7 +317,7 @@ class FitnessService:
                 goal=goal,
                 dialogue=history,
             )
-            self.actions.prepare(memory, question, safety_result, dialogue=history)
+            self.actions.prepare(memory, question, dialogue=history)
             fact_context = self.memory.context(
                 memory,
                 topic_id=plan["topic_id"],
@@ -343,7 +359,7 @@ class FitnessService:
                 response += "\n\nПамять обновлена:\n" + "\n".join(
                     "• " + item for item in memory["notifications"]
                 )
-            return self.memory.complete(memory, message_id, response)
+            return self.workflow.complete(memory, message_id, response)
         except Exception:
             self.store.set_status(message_id, "failed")
             self.audit("answer_failed", {"message_id": message_id})

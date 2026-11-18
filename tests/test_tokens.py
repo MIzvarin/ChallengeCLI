@@ -1,6 +1,7 @@
 """Actual API token usage, durable totals and the inline TUI; no paid requests."""
 
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 import httpx
 from rich.text import Text
-from support import EMPTY_TURN, safety_json
+from support import EMPTY_TURN, safe_response, seed_accepted_goal
 from test_memory import luna_reply
 from textual.widgets import Input, RichLog, Static
 
@@ -174,34 +175,30 @@ def test_legacy_usage_and_invalid_numbers():
 async def panel_flow():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
+        seed_accepted_goal(service)
         app = FitAgentApp(service)
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
-            transport.post.side_effect = [
-                httpx.Response(
-                    200,
-                    json={
-                        "status": "completed",
-                        "output": [
-                            {
-                                "type": "message",
-                                "role": "assistant",
-                                "status": "completed",
-                                "content": [
-                                    {
-                                        "type": "output_text",
-                                        "text": EMPTY_TURN,
-                                    }
-                                ],
-                            }
-                        ],
-                        "usage": {"input_tokens": 10, "output_tokens": 2},
-                    },
-                ),
-                luna_reply(safety_json()),
-                reply(),
-                luna_reply(safety_json()),
-            ]
+
+            def post(url, **kwargs):
+                payload = kwargs["json"]
+                if "messages" in payload:
+                    return reply()
+                properties = payload["text"]["format"]["schema"]["properties"]
+                if "operations" in properties:
+                    return luna_reply(EMPTY_TURN, usage={"input_tokens": 10, "output_tokens": 2})
+                if "action" in properties:
+                    return luna_reply(
+                        json.dumps(
+                            {"action": "continue", "question": "", "plan": "", "criterion": ""}
+                        )
+                    )
+                messages = payload["input"]
+                return luna_reply(
+                    safe_response(messages, json.loads(messages[-1]["content"])["stage"])
+                )
+
+            transport.post.side_effect = post
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
                 panel = app.query_one(LogsPanel)
@@ -216,8 +213,8 @@ async def panel_flow():
                 await pilot.pause()
                 counts = str(panel.query_one("#token-counts", Static).renderable)
                 assert "контекст: 100" in counts and "ответ: 20" in counts
-                assert "всего: 592" in counts
-                sent = transport.post.call_args_list[2].kwargs["json"]["messages"]
+                assert "всего: 822" in counts
+                sent = transport.post.call_args_list[3].kwargs["json"]["messages"]
                 assert "ПОЛНЫЕ ДАННЫЕ" in sent[0]["content"]
                 assert "Как тренироваться?" in sent[1]["content"]
                 assert not field.disabled

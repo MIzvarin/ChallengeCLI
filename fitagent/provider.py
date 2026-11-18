@@ -91,9 +91,11 @@ class ModelClient:
             ) from None
 
     def generate_safety(self, messages, stage):
-        from fitagent.safety_schema import SAFETY_SCHEMA
+        from fitagent.safety_schema import schema_from_safety_messages
 
-        return self.generate_structured(messages, SAFETY_SCHEMA, purpose="safety_" + stage)
+        return self.generate_structured(
+            messages, schema_from_safety_messages(messages), purpose="safety_" + stage
+        )
 
     def _post(self, url, payload, purpose, model, output_limit):
         if not self.key:

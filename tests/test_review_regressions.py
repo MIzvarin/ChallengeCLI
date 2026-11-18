@@ -226,41 +226,59 @@ def test_confirmed_safety_edit_cannot_overfill_memory_or_consume_the_proposal():
         assert service.answer("Другой вопрос") == "Ответ"
 
 
-def test_initial_goal_warning_is_checked_before_display_or_persistence():
+def test_initial_draft_is_checked_before_display_or_execution():
+    from test_goal_workflow import PLAN, configure
+
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         marker = "UNSAFE_GOAL_ASSESSMENT"
-        client.generate.side_effect = lambda messages, limit, purpose: json.dumps(
-            {"warning": marker}
-        )
-        client.generate_safety.side_effect = safe_or_block_goal
         service.start_chat()
-        for answer in ANSWERS[:-1]:
+        for answer in ANSWERS:
             service.chat(answer)
-        error(lambda: service.chat(ANSWERS[-1]), "Не могу показать эту оценку цели")
-        assert store.latest("profiles") is None
-        assert "warning" not in service.onboarding.state()
+        configure(client, dict(PLAN, plan=marker))
+
+        def block_plan(messages, stage):
+            value = json.loads(safe_response(messages, stage))
+            if stage == "goal_plan":
+                value.update(
+                    status="block",
+                    description="Исключите опасный способ и выберите безопасную нагрузку.",
+                )
+                value["checks"][0]["status"] = "block"
+            return json.dumps(value)
+
+        client.generate_safety.side_effect = block_plan
+        assert "Опасность" in service.chat("продолжить")
+        assert store.latest("profiles") is not None
+        assert service.workflow.state()["stage"] == "validation"
         assert marker not in str(store.chat_messages()) + store.logs()
         payload = json.loads(client.generate_safety.call_args.args[0][1]["content"])
-        assert payload["draft"] == marker
+        assert json.loads(payload["draft"])["plan"] == marker
         assert payload["goal"]["text"] == ANSWERS[4]
         assert any(rule["category"] == "food_restrictions" for rule in payload["rules"])
 
 
-def test_cached_onboarding_warning_is_rechecked_before_confirmation():
+def test_changed_profile_data_invalidates_cached_plan_warning_before_confirmation():
+    from test_goal_workflow import configure
+
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
-        client.generate.side_effect = lambda messages, limit, purpose: (
-            '{"warning":"Обсудите цель со специалистом."}'
-        )
         service.start_chat()
         for answer in ANSWERS:
             service.chat(answer)
-        assert store.latest("profiles") is None
+        configure(client)
+        service.chat("продолжить")
+        fact = next(
+            f
+            for f in service.memory.repository.load(NOW)["facts"]
+            if f["category"] == "food_preferences"
+        )
+        service.memory.command(f"/memory edit {fact['id']} Другие предпочтения")
         calls = client.generate.call_count
-        client.generate_safety.side_effect = safe_or_block_goal
-        error(lambda: service.chat("подтверждаю"), "Не могу показать эту оценку цели")
-        assert store.latest("profiles") is None
+        assert "Согласие не принято" in service.chat("подтверждаю план")
+        assert service.workflow.state()["stage"] == "validation"
+        assert store.latest("profiles") is not None
+        assert not store.latest("goals")["risk_confirmed"]
         assert client.generate.call_count == calls
 
 
@@ -326,17 +344,16 @@ def test_cached_profile_warning_can_block_confirmation_without_consuming_it():
             assert db.execute("SELECT COUNT(*) FROM pending_actions").fetchone()[0] == 1
 
 
-def test_rephrased_advisory_does_not_prevent_onboarding_confirmation():
+def test_advisory_plan_confirmation_does_not_create_a_rephrasing_loop():
+    from test_goal_workflow import configure
+
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
-        client.generate.side_effect = lambda messages, limit, purpose: (
-            '{"warning":"Обсудите срок со специалистом."}'
-        )
         descriptions = iter(("Уточните подробности №1.", "Уточните подробности №2."))
 
         def warn(messages, stage):
             value = json.loads(safe_response(messages, stage))
-            if stage == "goal_response":
+            if stage == "goal_plan":
                 value["status"] = "warning"
                 value["description"] = next(descriptions)
                 value["checks"][0].update(status="warning", strictness="advisory")
@@ -346,9 +363,13 @@ def test_rephrased_advisory_does_not_prevent_onboarding_confirmation():
         service.start_chat()
         for answer in ANSWERS:
             service.chat(answer)
-        assert store.latest("profiles") is None
-        response = service.chat("подтверждаю")
-        assert "Уточните подробности №2" in response
+        configure(client)
+        response = service.chat("продолжить")
+        assert "Уточните подробности №1" in response
+        calls = client.generate_safety.call_count
+        service.chat("подтверждаю план")
+        assert service.workflow.state()["stage"] == "execution"
+        assert client.generate_safety.call_count == calls
         assert store.latest("profiles") is not None
         assert service.onboarding.state() is None
 

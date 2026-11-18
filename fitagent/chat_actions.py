@@ -3,6 +3,8 @@
 import json
 
 from fitagent.domain import validate_profile
+from fitagent.goal_state import EXECUTION, finish_goal, invalidate_goal, read_state
+from fitagent.goal_workflow import completion_matches, fingerprint
 from fitagent.memory import project
 from fitagent.memory_layers import memory_layer
 from fitagent.state_storage import journal
@@ -59,6 +61,7 @@ def archive_goal(db, snapshot, now):
     ).fetchone()
     if goal is None:
         raise ValueError("Активной цели нет. Опишите новую цель в чате.")
+    finish_goal(db, goal["id"])
     facts = [fact for fact in snapshot["facts"] if memory_layer(fact["category"]) == "medium"]
     db.execute(
         "INSERT INTO memory_archives(goal_id,created_at,facts) VALUES (?,?,?)",
@@ -105,7 +108,7 @@ class ChatActions:
             values["target"] = None
         return validate_profile(**values, now=self.service.clock())
 
-    def prepare(self, snapshot, question, safety_result, dialogue=None):
+    def prepare(self, snapshot, question, dialogue=None):
         proposals = []
         patch = snapshot.get("profile_change")
         if patch is not None:
@@ -128,12 +131,24 @@ class ChatActions:
                     "Целевой вес: укажите новое значение или отмену, но не оба действия сразу."
                 )
             profile = self.profile_from_patch(patch, snapshot)
+            managed = snapshot.get("goal_managed", False)
             result = self.service.safety.check(
-                "changes", question, snapshot, profile, changes=patch, dialogue=dialogue
+                "goal_proposal" if managed else "changes",
+                question,
+                snapshot,
+                profile,
+                changes=patch,
+                dialogue=dialogue,
+                report_only=managed,
             )
-            warning = self.service.assess_goal(
-                profile, safety_result=result, memory=snapshot, dialogue=dialogue
-            )
+            if managed:
+                warning = "Цель и план потребуют валидации до выполнения. "
+                if result["status"] != "allow":
+                    warning += result["description"]
+            else:
+                warning = self.service.assess_goal(
+                    profile, safety_result=result, memory=snapshot, dialogue=dialogue
+                )
             proposals.append(
                 {
                     "kind": "profile",
@@ -142,6 +157,7 @@ class ChatActions:
                         "warning": warning,
                         "question": question,
                         "dialogue": dialogue,
+                        "goal_managed": managed,
                     },
                 }
             )
@@ -157,10 +173,20 @@ class ChatActions:
                 }
             )
         completion = snapshot.get("completion", "none")
+        if snapshot.get("goal_managed") and completion == "goal":
+            flow = snapshot.get("goal_flow")
+            state = flow[0] if flow is not None else self.service.workflow.state()
+            if state is None or state["stage"] != EXECUTION:
+                completion = "none"
         if completion != "none":
-            proposals.append(
-                {"kind": completion, "payload": {"topic_id": snapshot["dialogue"]["topic_id"]}}
-            )
+            payload = {"topic_id": snapshot["dialogue"]["topic_id"]}
+            if completion == "goal":
+                goal = self.store.latest("goals")
+                if goal:
+                    flow = snapshot.get("goal_flow")
+                    state = flow[0] if flow is not None else self.service.workflow.state(goal)
+                    payload.update(self.service.workflow.completion_payload(goal, state, snapshot))
+            proposals.append({"kind": completion, "payload": payload})
         snapshot["proposals"] = proposals
 
     @staticmethod
@@ -210,7 +236,17 @@ class ChatActions:
             )
         if parts[0] == "/cancel":
             with self.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
                 db.execute("DELETE FROM pending_actions WHERE id=?", (row["id"],))
+                if row["kind"] == "goal":
+                    payload = json.loads(row["payload"])
+                    goal = db.execute(
+                        "SELECT id FROM goals WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                    if goal and goal[0] == payload.get("goal_id"):
+                        state = read_state(db, goal[0])
+                        if state["fingerprint"] != payload.get("data_fingerprint"):
+                            invalidate_goal(db, goal[0])
             return "Предложение отменено. Данные не изменены."
         snapshot = self.service.memory.repository.load(self.service.clock())
         if row["revision"] != snapshot["revision"] or row["session"] != snapshot["session"]:
@@ -218,6 +254,19 @@ class ChatActions:
                 "После предложения данные изменились. Повторите запрос изменения для новой проверки."
             )
         payload = json.loads(row["payload"])
+        if row["kind"] == "goal":
+            goal = self.store.latest("goals")
+            state = self.service.workflow.state(goal) if goal else None
+            now = self.service.clock()
+            profile = self.service.current_profile()
+            if state is None or state["stage"] != EXECUTION:
+                raise ValueError(
+                    "Завершение доступно только при выполнении актуального проверенного плана. Сначала пройдите валидацию."
+                )
+            if not completion_matches(state, payload, fingerprint(goal, profile, snapshot, now)):
+                raise ValueError(
+                    "Предложение о завершении устарело: план или данные изменились либо предложение создано старой версией приложения. Сообщите о достижении цели ещё раз, чтобы получить новое подтверждение."
+                )
         candidate = project(
             snapshot, payload.get("operations", []), None, self.service.clock(), manual=True
         )
@@ -227,8 +276,9 @@ class ChatActions:
             self.service.memory.context(candidate)
             self.service.memory.check_inventory(candidate)
             profile = payload.get("profile") or self.service.current_profile()
+            managed = payload.get("goal_managed", False)
             result = self.service.safety.check(
-                "changes",
+                "goal_proposal" if managed else "changes",
                 payload["question"],
                 candidate,
                 profile,
@@ -236,17 +286,20 @@ class ChatActions:
                 confirmed=True,
                 previous_snapshot=snapshot,
                 dialogue=payload.get("dialogue"),
+                report_only=managed,
             )
             if row["kind"] == "profile":
-                warning = self.service.checked_goal_warning(
-                    profile, payload["warning"], memory=candidate, dialogue=payload.get("dialogue")
-                )
+                warning = payload["warning"]
+                if not managed:
+                    warning = self.service.checked_goal_warning(
+                        profile, warning, memory=candidate, dialogue=payload.get("dialogue")
+                    )
                 self.store.save_profile(
                     profile,
                     self.service.clock(),
                     self.service.next_check(),
                     warning,
-                    bool(warning),
+                    bool(warning) and not managed,
                     memory=candidate,
                     record_weight=False,
                 )
@@ -270,5 +323,5 @@ class ChatActions:
         return (
             "Задача завершена. Краткосрочная память очищена."
             if row["kind"] == "task"
-            else "Цель завершена. Среднесрочная память архивирована, текущие данные сохранены. Опишите новую цель в чате."
+            else "4/4 · Готово\nЦель завершена. Среднесрочная память архивирована, текущие данные сохранены. Опишите новую цель в чате."
         )

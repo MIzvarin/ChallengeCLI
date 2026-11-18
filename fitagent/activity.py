@@ -20,6 +20,8 @@ SAFETY_STAGES = {
     "changes": "изменение данных",
     "response": "ответ",
     "goal_response": "оценка цели",
+    "goal_plan": "валидация плана цели",
+    "goal_proposal": "изменение желаемой цели",
 }
 
 

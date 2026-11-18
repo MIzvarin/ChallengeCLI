@@ -284,7 +284,10 @@ def test_provider_diagnostics_cover_http_network_timeout_and_bad_envelopes():
             for value, expected in cases:
                 transport.post.side_effect = [value]
                 try:
-                    client.generate_safety([], "request")
+                    client.generate_safety(
+                        [{"role": "user", "content": '{"required_rule_ids":["system"]}'}],
+                        "request",
+                    )
                 except SafetyValidationError as exc:
                     assert str(exc) == SAFETY_ERROR
                     assert exc.diagnostics == expected
@@ -294,7 +297,9 @@ def test_provider_diagnostics_cover_http_network_timeout_and_bad_envelopes():
         assert "PRIVATE" not in store.logs()
         client.key = ""
         try:
-            client.generate_safety([], "request")
+            client.generate_safety(
+                [{"role": "user", "content": '{"required_rule_ids":["system"]}'}], "request"
+            )
         except SafetyValidationError as exc:
             assert exc.diagnostics == {"reason": "missing_api_key"}
         else:

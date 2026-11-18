@@ -224,13 +224,14 @@ def validate_shape(value, schema, *, error_factory=None, path="$"):
         for key, child in schema["properties"].items():
             validate_shape(value[key], child, error_factory=error_factory, path=f"{path}.{key}")
     elif actual == "array":
-        if len(value) > schema.get("maxItems", math.inf):
+        if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", math.inf):
             raise shape_error(
                 error_factory,
                 "invalid_length",
                 path,
                 actual_length=len(value),
-                maximum_length=schema["maxItems"],
+                minimum_length=schema.get("minItems", 0),
+                maximum_length=schema.get("maxItems"),
             )
         for index, item in enumerate(value):
             validate_shape(

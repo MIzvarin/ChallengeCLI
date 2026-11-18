@@ -287,6 +287,9 @@ class FactRepository:
                 new,
                 message,
             )
+        from fitagent.goal_state import write_goal_turn
+
+        write_goal_turn(db, snapshot)
 
     def complete(self, snapshot, message_id, response, now):
         with self.store.connect() as db:

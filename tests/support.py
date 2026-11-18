@@ -56,3 +56,80 @@ def safety_json(
         },
         ensure_ascii=False,
     )
+
+
+def seed_accepted_goal(service):
+    """Explicit pre-existing, confirmed plan fixture for tests unrelated to planning."""
+    from fitagent.goal_state import (
+        EXECUTION,
+        PLANNING,
+        VALIDATION,
+        read_state,
+        transition,
+        write_state,
+    )
+    from fitagent.goal_workflow import REQUIRED_CATEGORIES, fingerprint
+    from fitagent.memory import project
+
+    now = service.clock()
+    snapshot = service.memory.repository.load(now)
+    present = {fact["category"] for fact in snapshot["facts"]}
+    operations = [
+        {
+            "action": "upsert",
+            "update_mode": "replace",
+            "fact_id": None,
+            "category": category,
+            "key": "fixture_report",
+            "scope": "usual",
+            "applicability": "global",
+            "topic_id": None,
+            "value": {
+                "text": "Сообщено отсутствие ограничений/режима",
+                "quantity": None,
+                "unit": None,
+                "qualifier": None,
+            },
+            "valid_from": None,
+            "valid_until": None,
+            "valid_until_action": "keep",
+            "source_quote": "нет",
+            "clarification": None,
+        }
+        for category in REQUIRED_CATEGORIES
+        if category not in present
+    ]
+    service.memory.repository.save_manual(project(snapshot, operations, None, now, manual=True))
+    goal = service.store.latest("goals")
+    snapshot = service.memory.repository.load(now)
+    with service.store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        state = read_state(db, goal["id"])
+        if state["stage"] in {PLANNING, EXECUTION}:
+            transition(state, VALIDATION)
+        state.update(
+            plan="Умеренные тренировки с отдыхом и контролем самочувствия.",
+            criterion="Выполнить согласованный объём без ухудшения самочувствия.",
+            assessment={"status": "allow", "description": "Проверка пройдена."},
+            fingerprint=fingerprint(goal, service.current_profile(), snapshot, now),
+            question="",
+        )
+        write_state(db, state, state["version"])
+        state = read_state(db, goal["id"])
+        transition(state, EXECUTION)
+        write_state(db, state, state["version"])
+
+
+def allow_goal_continue(client):
+    """Extend a fake extraction client with an explicit structured 'no plan changes' reply."""
+    generator = client.generate_structured
+    ordinary = generator.side_effect
+
+    def structured(messages, schema, purpose="memory_extraction"):
+        if purpose == "goal_planning":
+            return json.dumps({"action": "continue", "question": "", "plan": "", "criterion": ""})
+        if ordinary is not None:
+            return ordinary(messages, schema)
+        return generator.return_value
+
+    generator.side_effect = structured
