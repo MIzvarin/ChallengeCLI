@@ -138,7 +138,7 @@ def test_end_actions_require_consistent_fields_and_preserve_safety_constraints()
         client.generate.assert_not_called()
 
 
-def test_scheduled_replacement_keeps_previous_version_until_boundary_after_restart():
+def test_future_replacement_applies_immediately_and_survives_restart():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         extract(client, routine("Три тренировки"))
@@ -147,20 +147,21 @@ def test_scheduled_replacement_keeps_previous_version_until_boundary_after_resta
         start = NOW + timedelta(days=7)
         schedule(service, client, "С 21 ноября четыре тренировки", start)
         replacement = facts(service)[0]
-        assert replacement["id"] != original["id"]
+        assert replacement["id"] == original["id"]
         current = context_facts(service, NOW)
-        assert [fact["id"] for fact in current] == [original["id"]]
-        assert current[0]["valid_until"] == start.isoformat()
-        assert "Три тренировки" in service.memory.describe()
+        assert [fact["id"] for fact in current] == [replacement["id"]]
+        assert current[0]["valid_from"] == NOW.isoformat()
+        assert current[0]["valid_until"] is None
+        assert "Три тренировки" not in service.memory.describe()
         reopened = FitnessService(Storage(directory), client, clock=lambda: NOW)
         assert [fact["id"] for fact in context_facts(reopened, start - timedelta(seconds=1))] == [
-            original["id"]
+            replacement["id"]
         ]
         assert [fact["id"] for fact in context_facts(reopened, start)] == [replacement["id"]]
         assert not reopened.memory.repository.load(start)["previous_versions"]
 
 
-def test_postponed_and_corrected_pending_version_does_not_activate_early():
+def test_postponed_and_corrected_version_always_applies_immediately():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         extract(client, routine("Три тренировки"))
@@ -168,12 +169,13 @@ def test_postponed_and_corrected_pending_version_does_not_activate_early():
         start = NOW + timedelta(days=7)
         schedule(service, client, "С 21 ноября четыре тренировки", start)
         schedule(service, client, "Переносим на 28 ноября", NOW + timedelta(days=14))
-        assert context_facts(service, start)[0]["value"]["text"] == "Три тренировки"
+        assert context_facts(service, NOW)[0]["value"]["text"] == "Переносим на 28 ноября"
         extract(client, routine("Нет, пять тренировок", fact_id=facts(service)[0]["id"]))
         service.answer("Нет, пять тренировок")
-        assert facts(service)[0]["valid_from"] == (NOW + timedelta(days=14)).isoformat()
+        assert facts(service)[0]["valid_from"] == NOW.isoformat()
         assert (
-            context_facts(service, NOW + timedelta(days=10))[0]["value"]["text"] == "Три тренировки"
+            context_facts(service, NOW + timedelta(days=10))[0]["value"]["text"]
+            == "Нет, пять тренировок"
         )
         assert (
             context_facts(service, NOW + timedelta(days=14))[0]["value"]["text"]
@@ -181,7 +183,7 @@ def test_postponed_and_corrected_pending_version_does_not_activate_early():
         )
 
 
-def test_later_change_preserves_started_revision_and_immediate_change_stops_predecessors():
+def test_later_report_replaces_old_revision_without_future_predecessors():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         extract(client, routine("Три тренировки"))
@@ -191,7 +193,7 @@ def test_later_change_preserves_started_revision_and_immediate_change_stops_pred
         schedule(service, client, "С 28 ноября пять тренировок", NOW + timedelta(days=14))
         assert (
             context_facts(service, NOW + timedelta(days=9))[0]["value"]["text"]
-            == "С 21 ноября четыре тренировки"
+            == "С 28 ноября пять тренировок"
         )
         extract(
             client,
@@ -276,12 +278,12 @@ def test_transaction_failure_rolls_back_rescheduled_predecessor_and_new_revision
         assert "TEST_SECRET" not in store.logs()
 
 
-def test_manual_text_edit_preserves_original_period_including_expired_or_pending():
+def test_manual_text_edit_applies_now_and_preserves_explicit_end():
     for future in (False, True):
         with tempfile.TemporaryDirectory() as directory:
             store, client, service = fixture(directory)
             start = NOW + timedelta(days=1) if future else NOW - timedelta(days=2)
-            end = start + timedelta(days=1)
+            end = NOW + timedelta(days=3)
             extract(
                 client,
                 routine(
@@ -292,17 +294,16 @@ def test_manual_text_edit_preserves_original_period_including_expired_or_pending
             old = facts(service)[0]
             service.memory.command(f"/memory edit {old['id']} Четыре тренировки")
             new = facts(service)[0]
-            assert (new["valid_from"], new["valid_until"]) == (
-                old["valid_from"],
-                old["valid_until"],
-            )
+            assert new["valid_from"] == NOW.isoformat()
+            assert new["valid_until"] == end.isoformat()
 
 
-def test_transition_preserves_timezone_and_microsecond_precision():
+def test_immediate_transition_uses_report_timezone_and_microsecond_precision():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         extract(client, routine("Три тренировки"))
         service.answer("Три тренировки")
+        service.clock = lambda: NOW.replace(microsecond=123456)
         extract(
             client,
             routine(
@@ -312,22 +313,30 @@ def test_transition_preserves_timezone_and_microsecond_precision():
             ),
         )
         service.answer("Четыре тренировки с новой даты")
-        start = (NOW + timedelta(days=7)).replace(microsecond=123456)
-        assert (
-            context_facts(service, start - timedelta(microseconds=1))[0]["value"]["text"]
-            == "Три тренировки"
-        )
+        start = service.clock()
+        assert facts(service)[0]["valid_from"] == start.isoformat()
         assert context_facts(service, start)[0]["value"]["text"] == "Четыре тренировки с новой даты"
 
 
 def test_migration_restores_predecessor_of_old_pending_revision_without_reviving_revoked_fact():
+    from support import seed_legacy_fact_versions
+
     for revoked in (False, True):
         with tempfile.TemporaryDirectory() as directory:
             store, client, service = fixture(directory)
             extract(client, routine("Три тренировки"))
             service.answer("Три тренировки")
+            versions = [facts(service)[0]]
             schedule(service, client, "С 21 ноября четыре тренировки", NOW + timedelta(days=7))
+            versions.append(
+                dict(facts(service)[0], valid_from=(NOW + timedelta(days=7)).isoformat())
+            )
             schedule(service, client, "Переносим на 28 ноября", NOW + timedelta(days=14))
+            versions.append(
+                dict(facts(service)[0], valid_from=(NOW + timedelta(days=14)).isoformat())
+            )
+            # Explicitly recreate an existing pre-policy future schedule for migration coverage.
+            seed_legacy_fact_versions(store, versions)
             if revoked:
                 extract(
                     client,

@@ -289,7 +289,11 @@ class GoalWorkflow:
         if state["stage"] == DONE:
             raise ValueError("Эта цель уже завершена. Опишите новую цель в чате.")
         memory["goal_flow"] = (state, version)
-        pending_changes = memory.get("profile_change") or memory.get("pending_safety")
+        pending_changes = (
+            memory.get("profile_change")
+            or memory.get("pending_safety")
+            or memory.get("pending_facts")
+        )
         if (
             state["stage"] == EXECUTION
             and memory.get("completion") == "goal"

@@ -132,10 +132,17 @@ def test_safety_changes_require_explicit_confirmation_and_cover_previous_rule():
         )
         assert "обновлена" in service.chat("/confirm 1")
         current = facts(service)[0]
-        assert current["id"] != old["id"]
+        assert current["id"] == old["id"]
         payload = json.loads(client.generate_safety.call_args.args[0][1]["content"])
         assert payload["confirmed"] is True
         assert payload["previous_rules"][0]["value"] == old["value"]
+        assert payload["previous_rules"][0]["rule_id"] == f"previous:{old['id']}"
+        assert payload["rules"][0]["rule_id"] == f"fact:{old['id']}"
+        assert set(payload["required_rule_ids"]) == {
+            "system",
+            f"fact:{old['id']}",
+            f"previous:{old['id']}",
+        }
         history = service.memory.command(f"/memory history {current['id']}")
         assert old["value"]["text"] in history and current["value"]["text"] in history
         error(lambda: service.chat("/confirm 1"), "не найдено")

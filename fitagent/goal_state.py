@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from fitagent.memory_schema import object_schema, string_schema, unique_object, validate_shape
+from fitagent.state_storage import record_activity
 
 PLANNING = "planning"
 VALIDATION = "validation"
@@ -131,6 +132,10 @@ def write_state(db, state, expected_version):
             json.dumps(dict(state, version=expected_version + 1), ensure_ascii=False),
         ),
     )
+    if (state["plan"], state["criterion"]) != (current["plan"], current["criterion"]):
+        # The enclosing transaction supplies a timestamp without logging plan contents.
+        stamp = db.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f+00:00','now')").fetchone()[0]
+        record_activity(db, "goal_plan_updated", {"goal_id": state["goal_id"]}, stamp)
 
 
 def write_goal_turn(db, snapshot):

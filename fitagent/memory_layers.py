@@ -1,6 +1,6 @@
 """Layer classification is independent of applicability, provenance and version lifetimes."""
 
-from fitagent.memory_schema import SAFETY_CATEGORIES, parse_stamp
+from fitagent.memory_schema import SAFETY_CATEGORIES, reported_order
 
 PREFERENCES = {"food_preferences", "communication"}
 LONG_TERM = {"equipment", "training_experience"}
@@ -31,6 +31,6 @@ def inventory_facts(facts):
     normal = [fact for fact in facts if fact["category"] != "measurements"]
     measured = sorted(
         (fact for fact in facts if fact["category"] == "measurements"),
-        key=lambda fact: (parse_stamp(fact["valid_from"]), fact["id"]),
+        key=reported_order,
     )
     return normal + measured[-30:]

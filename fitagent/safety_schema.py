@@ -177,7 +177,7 @@ def safety_request_schema(required_rules):
         or any(
             not isinstance(rule, str)
             or len(rule) > 100
-            or not re.fullmatch(r"system|(?:fact|proposed):[0-9]+", rule)
+            or not re.fullmatch(r"system|(?:fact|previous|proposed):[0-9]+", rule)
             for rule in required_rules
         )
         or len(set(required_rules)) != len(required_rules)

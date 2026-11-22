@@ -9,7 +9,13 @@ from uuid import uuid4
 
 from fitagent.activity import ACTIVITY_KINDS, format_activity
 from fitagent.fact_storage import initialize_memory
-from fitagent.state_storage import current_weight, initialize_state, profile_weight, weight_rows
+from fitagent.state_storage import (
+    current_weight,
+    initialize_state,
+    profile_weight,
+    record_activity,
+    weight_rows,
+)
 from fitagent.tokens import collect_usage
 from fitagent.topic_storage import initialize_topics
 
@@ -134,6 +140,12 @@ class Storage:
                 "SELECT id FROM goals WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1"
             ).fetchone()
             invalidate_goal(db, active[0])
+            record_activity(
+                db,
+                "profile_updated",
+                {"profile_id": profile_id, "goal_id": active[0]},
+                stamp,
+            )
             db.execute(
                 "INSERT INTO changes(day,created_at,kind,data) VALUES (?,?,?,?)",
                 (now.date().isoformat(), stamp, "profile_confirmed", json.dumps(profile)),

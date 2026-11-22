@@ -256,7 +256,7 @@ def test_scope_correction_keeps_lineage_and_delete_removes_all_its_versions():
         )
         service.answer("Только для этого меню")
         current = facts(service)[0]
-        assert current["id"] != original["id"] and current["lineage_id"] == original["lineage_id"]
+        assert current["id"] == original["id"] and current["lineage_id"] == original["lineage_id"]
         assert current["applicability"] == "topic" and current["topic_id"] == active(service)
         assert not json.loads(service.memory.context(topic_id=999))["facts"]
         service.memory.command(f"/memory delete {current['id']}")

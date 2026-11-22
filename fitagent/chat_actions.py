@@ -7,7 +7,7 @@ from fitagent.goal_state import EXECUTION, finish_goal, invalidate_goal, read_st
 from fitagent.goal_workflow import completion_matches, fingerprint
 from fitagent.memory import project
 from fitagent.memory_layers import memory_layer
-from fitagent.state_storage import journal
+from fitagent.state_storage import journal, record_activity
 
 
 def write_actions(db, snapshot, now):
@@ -23,6 +23,16 @@ def write_actions(db, snapshot, now):
             ),
         ).lastrowid
         snapshot.setdefault("action_ids", []).append(action_id)
+        if proposal["kind"] in {"safety", "facts"}:
+            record_activity(
+                db,
+                "fact_change_pending",
+                {
+                    "action_id": action_id,
+                    "fact_ids": [op["fact_id"] for op in proposal["payload"]["operations"]],
+                },
+                now.isoformat(),
+            )
 
 
 def close_task(db, topic_id, now):
@@ -161,18 +171,28 @@ class ChatActions:
                     },
                 }
             )
-        if snapshot.get("pending_safety"):
-            proposals.append(
-                {
-                    "kind": "safety",
-                    "payload": {
-                        "operations": snapshot["pending_safety"],
-                        "question": question,
-                        "dialogue": dialogue,
-                    },
-                }
-            )
+        for key, kind in (("pending_safety", "safety"), ("pending_facts", "facts")):
+            if snapshot.get(key):
+                proposals.append(
+                    {
+                        "kind": kind,
+                        "payload": {
+                            "operations": snapshot[key],
+                            "previous_values": {
+                                str(fact["id"]): fact["value"]["text"]
+                                for fact in snapshot["facts"]
+                                if fact["id"] in {op["fact_id"] for op in snapshot[key]}
+                            },
+                            "source_message_id": snapshot.get("source_message_id"),
+                            "source_topic_id": snapshot["dialogue"]["topic_id"],
+                            "question": question,
+                            "dialogue": dialogue,
+                        },
+                    }
+                )
         completion = snapshot.get("completion", "none")
+        if snapshot.get("pending_safety") or snapshot.get("pending_facts"):
+            completion = "none"
         if snapshot.get("goal_managed") and completion == "goal":
             flow = snapshot.get("goal_flow")
             state = flow[0] if flow is not None else self.service.workflow.state()
@@ -202,11 +222,21 @@ class ChatActions:
                 )
                 if payload["warning"]:
                     description += "\nПредупреждение: " + payload["warning"]
-            elif kind == "safety":
-                description = "Изменить ограничения безопасности: " + "; ".join(
-                    op["value"]["text"] for op in payload["operations"]
+            elif kind in {"safety", "facts"}:
+                label = (
+                    "ограничения безопасности" if kind == "safety" else "критически важные сведения"
                 )
-                description += ". Внимание: исправляйте только ошибочные/изменившиеся сведения, не для обхода безопасности."
+                description = (
+                    f"Уточните: заменить {label}? До подтверждения действуют прежние данные."
+                )
+                for op in payload["operations"]:
+                    previous = payload.get("previous_values", {}).get(
+                        str(op["fact_id"]), "сохранённое значение"
+                    )
+                    proposed = "отозвать факт" if op["action"] == "revoke" else op["value"]["text"]
+                    description += f"\nФакт №{op['fact_id']}: {previous} → {proposed}"
+                if kind == "safety":
+                    description += "\nВнимание: исправляйте только ошибочные/изменившиеся сведения, не для обхода безопасности."
             elif kind == "task":
                 description = "Завершить задачу и очистить её краткосрочную память? Переписка останется в истории."
             else:
@@ -267,11 +297,17 @@ class ChatActions:
                 raise ValueError(
                     "Предложение о завершении устарело: план или данные изменились либо предложение создано старой версией приложения. Сообщите о достижении цели ещё раз, чтобы получить новое подтверждение."
                 )
+        source_id = payload.get("source_message_id")
         candidate = project(
-            snapshot, payload.get("operations", []), None, self.service.clock(), manual=True
+            snapshot,
+            payload.get("operations", []),
+            source_id,
+            self.service.clock(),
+            manual=source_id is None,
+            source_topic_id=payload.get("source_topic_id"),
         )
         candidate["consume_action"] = row["id"]
-        if row["kind"] in {"profile", "safety"}:
+        if row["kind"] in {"profile", "safety", "facts"}:
             self.service.memory.clock = self.service.clock
             self.service.memory.context(candidate)
             self.service.memory.check_inventory(candidate)

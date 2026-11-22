@@ -120,6 +120,39 @@ def seed_accepted_goal(service):
         write_state(db, state, state["version"])
 
 
+def seed_legacy_fact_versions(store, versions):
+    """Recreate actual old multi-row facts; current updates intentionally keep one row."""
+    from fitagent.fact_storage import FACT_COLUMNS
+
+    columns = (*FACT_COLUMNS[1:], "status", "superseded_at")
+    root_id = versions[0]["id"]
+    with store.connect() as db:
+        for index, fact in enumerate(versions):
+            following = versions[index + 1] if index + 1 < len(versions) else None
+            values = dict(
+                fact,
+                fact_key=fact["key"],
+                value=json.dumps(fact["value"], ensure_ascii=False),
+                lineage_id=versions[0]["lineage_id"],
+                status="replaced" if following else "active",
+                superseded_at=following["valid_from"] if following else None,
+            )
+            if index == 0:
+                db.execute(
+                    f"UPDATE sticky_facts SET {','.join(column + '=?' for column in columns)} WHERE id=?",
+                    [*[values[column] for column in columns], root_id],
+                )
+            else:
+                new_id = db.execute(
+                    f"INSERT INTO sticky_facts({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                    [values[column] for column in columns],
+                ).lastrowid
+                db.execute(
+                    "UPDATE fact_sources SET fact_id=? WHERE fact_id=? AND message_id=?",
+                    (new_id, root_id, fact["source_message_id"]),
+                )
+
+
 def allow_goal_continue(client):
     """Extend a fake extraction client with an explicit structured 'no plan changes' reply."""
     generator = client.generate_structured

@@ -16,7 +16,7 @@ from fitagent.domain import (
 )
 from fitagent.goal_workflow import ACCEPT_PLAN, GoalWorkflow
 from fitagent.memory import CONTEXT_RULES, FactMemory
-from fitagent.memory_schema import parse_stamp
+from fitagent.memory_schema import reported_order
 from fitagent.onboarding import ChatOnboarding
 from fitagent.safety import SafetyGuard
 from fitagent.topics import TOPIC_CONTEXT_RULES, TopicRouter
@@ -71,7 +71,7 @@ class FitnessService:
             if fact["category"] == "measurements" and fact["key"].startswith("weight_")
         ]
         if weights:
-            newest = max(weights, key=lambda fact: (parse_stamp(fact["valid_from"]), fact["id"]))
+            newest = max(weights, key=reported_order)
             profile.update(weight=newest["value"]["quantity"], measured_at=newest["valid_from"])
         else:
             profile.update(weight=None, measured_at=None)

@@ -4,8 +4,9 @@ import json
 from datetime import datetime
 from itertools import groupby
 
+from fitagent.memory_display import display_archives, display_history
 from fitagent.memory_schema import parse_stamp
-from fitagent.state_storage import journal
+from fitagent.state_storage import journal, record_activity
 from fitagent.topic_storage import write_topic_turn
 
 FACT_COLUMNS = (
@@ -192,6 +193,13 @@ class FactRepository:
             row = db.execute(
                 "SELECT created_at,content,role,status FROM messages WHERE id=?", (message_id,)
             ).fetchone()
+            newer = db.execute(
+                "SELECT 1 FROM memory_turns WHERE message_id>? LIMIT 1", (message_id,)
+            ).fetchone()
+        if newer:
+            raise ValueError(
+                "После этого сообщения уже обработано более новое. Повторите актуальные сведения новым сообщением."
+            )
         if (
             not row
             or row["role"] != "user"
@@ -243,9 +251,12 @@ class FactRepository:
             db.execute(
                 f"INSERT INTO sticky_facts({','.join(FACT_COLUMNS)}) "
                 f"VALUES ({','.join('?' for _ in FACT_COLUMNS)}) ON CONFLICT(id) DO UPDATE SET "
-                "updated_at=excluded.updated_at,review_at=excluded.review_at,"
-                "source_message_id=excluded.source_message_id,origin=excluded.origin,"
-                "source_topic_id=excluded.source_topic_id",
+                + ",".join(
+                    f"{column}=excluded.{column}"
+                    for column in FACT_COLUMNS
+                    if column not in {"id", "created_at"}
+                )
+                + ",status='active',superseded_at=NULL",
                 [values[column] for column in FACT_COLUMNS],
             )
         for fact_id, message_id, quote, source_topic_id in snapshot["sources"]:
@@ -287,6 +298,8 @@ class FactRepository:
                 new,
                 message,
             )
+        for details in snapshot.get("activity", []):
+            record_activity(db, "fact_changed", details, snapshot["recorded_at"])
         from fitagent.goal_state import write_goal_turn
 
         write_goal_turn(db, snapshot)
@@ -330,7 +343,7 @@ class FactRepository:
             )
         return response
 
-    def delete(self, fact_id):
+    def delete(self, fact_id, now=None):
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -364,6 +377,12 @@ class FactRepository:
                 "INSERT INTO settings VALUES ('memory_revision','1') ON CONFLICT(key) "
                 "DO UPDATE SET value=CAST(value AS INTEGER)+1"
             )
+            record_activity(
+                db,
+                "fact_changed",
+                {"action": "deleted", "fact_id": fact_id},
+                (now or datetime.now().astimezone()).isoformat(),
+            )
 
     def save_manual(self, snapshot):
         with self.store.connect() as db:
@@ -380,18 +399,9 @@ class FactRepository:
             rows = db.execute(
                 "SELECT * FROM memory_journal WHERE lineage_id=? ORDER BY id", (row[0],)
             ).fetchall()
-        return "Журнал изменений:\n" + "\n".join(
-            f"{r['recorded_at']} · действует с {r['effective_at']} · {r['action']} · "
-            f"{r['old_value'] or 'не было'} → {r['new_value'] or 'отозвано'}"
-            for r in rows
-        )
+        return display_history(fact_id, rows)
 
     def archives(self):
         with self.store.connect() as db:
             rows = db.execute("SELECT * FROM memory_archives ORDER BY id").fetchall()
-        return "Архив среднесрочной памяти:\n" + (
-            "\n".join(
-                f"№{r['id']} · цель №{r['goal_id']} · {r['created_at']}\n{r['facts']}" for r in rows
-            )
-            or "Архив пока пуст."
-        )
+        return display_archives(rows)

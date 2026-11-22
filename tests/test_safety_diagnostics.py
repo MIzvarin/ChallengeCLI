@@ -182,6 +182,7 @@ def test_service_failure_is_distinct_from_invalid_result_and_has_no_exception_te
 def test_public_causes_remain_safe_and_older_errors_remain_readable():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
+        baseline = len(store.activity_logs().splitlines())
         for reason in (*SAFETY_FAILURE_REASONS, "PRIVATE_UNKNOWN", ["PRIVATE"]):
             store.event(
                 "safety_failed",
@@ -196,7 +197,7 @@ def test_public_causes_remain_safe_and_older_errors_remain_readable():
             )
         store.event("safety_failed", {"stage": "request", "type": "ValueError"}, service.clock())
         public = store.activity_logs()
-        assert len(public.splitlines()) == len(SAFETY_FAILURE_REASONS) + 3
+        assert len(public.splitlines()) == baseline + len(SAFETY_FAILURE_REASONS) + 3
         assert all(reason in public for reason in SAFETY_FAILURE_REASONS.values())
         assert "PRIVATE" not in public and "ValueError" not in public
         assert public.splitlines()[-1].endswith(

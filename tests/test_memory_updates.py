@@ -21,7 +21,7 @@ def initial_routine(service, client):
     schedule(service, client, "С 21 ноября четыре тренировки", NOW + timedelta(days=7))
 
 
-def test_append_preserves_each_future_stage_and_boundaries_after_restart():
+def test_legacy_append_input_is_applied_now_and_survives_restart():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         initial_routine(service, client)
@@ -36,22 +36,25 @@ def test_append_preserves_each_future_stage_and_boundaries_after_restart():
         last = facts(service)[0]
         reopened = FitnessService(Storage(directory), client, clock=lambda: NOW)
         for stamp, expected in (
-            (NOW, "Три тренировки"),
-            (NOW + timedelta(days=7) - timedelta(microseconds=1), "Три тренировки"),
-            (NOW + timedelta(days=7), "С 21 ноября четыре тренировки"),
-            (NOW + timedelta(days=10), "С 21 ноября четыре тренировки"),
+            (NOW, "Затем с 28 ноября пять тренировок"),
+            (
+                NOW + timedelta(days=7) - timedelta(microseconds=1),
+                "Затем с 28 ноября пять тренировок",
+            ),
+            (NOW + timedelta(days=7), "Затем с 28 ноября пять тренировок"),
+            (NOW + timedelta(days=10), "Затем с 28 ноября пять тренировок"),
             (NOW + timedelta(days=14), "Затем с 28 ноября пять тренировок"),
         ):
             current = context_facts(reopened, stamp)
             assert [fact["value"]["text"] for fact in current] == [expected]
-        assert context_facts(reopened, NOW + timedelta(days=10))[0]["id"] == middle["id"]
+        assert context_facts(reopened, NOW + timedelta(days=10))[0]["id"] == last["id"]
         assert context_facts(reopened, NOW + timedelta(days=14))[0]["id"] == last["id"]
         with store.connect() as db:
             assert (
                 db.execute(
                     "SELECT superseded_at FROM sticky_facts WHERE id=?", (middle["id"],)
                 ).fetchone()[0]
-                == (NOW + timedelta(days=14)).isoformat()
+                is None
             )
         service.clock = lambda: NOW + timedelta(days=10)
         extract(client)
@@ -60,10 +63,10 @@ def test_append_preserves_each_future_stage_and_boundaries_after_restart():
         fact_block = json.loads(
             sent.split("ЗАКРЕПЛЁННЫЕ ФАКТЫ (JSON):\n", 1)[1].split("\nТЕМА И CHECKPOINT", 1)[0]
         )
-        assert [fact["id"] for fact in fact_block["facts"]] == [middle["id"]]
+        assert [fact["id"] for fact in fact_block["facts"]] == [last["id"]]
 
 
-def test_replacing_last_stage_does_not_cancel_earlier_appended_stage():
+def test_latest_report_replaces_every_previous_stage_immediately():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         initial_routine(service, client)
@@ -77,7 +80,7 @@ def test_replacing_last_stage_does_not_cancel_earlier_appended_stage():
         schedule(service, client, "Последний этап переносим на 5 декабря", NOW + timedelta(days=21))
         assert [
             fact["value"]["text"] for fact in context_facts(service, NOW + timedelta(days=17))
-        ] == ["С 21 ноября четыре тренировки"]
+        ] == ["Последний этап переносим на 5 декабря"]
         assert [
             fact["value"]["text"] for fact in context_facts(service, NOW + timedelta(days=21))
         ] == ["Последний этап переносим на 5 декабря"]
@@ -90,13 +93,13 @@ def test_replacing_last_stage_does_not_cancel_earlier_appended_stage():
         )
         assert [
             fact["value"]["text"] for fact in context_facts(service, NOW + timedelta(days=22))
-        ] == ["Последний этап переносим на 5 декабря"]
+        ] == ["Потом с 12 декабря шесть тренировок"]
         assert [
             fact["value"]["text"] for fact in context_facts(service, NOW + timedelta(days=28))
         ] == ["Потом с 12 декабря шесть тренировок"]
 
 
-def test_append_does_not_extend_predecessors_own_end_or_resume_expired_versions():
+def test_immediate_replacement_with_clear_end_does_not_resume_previous_versions():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         initial_routine(service, client)
@@ -115,11 +118,11 @@ def test_append_does_not_extend_predecessors_own_end_or_resume_expired_versions(
             update_mode="append",
             valid_until_action="clear",
         )
+        assert context_facts(service, NOW)[0]["valid_until"] is None
         assert (
-            context_facts(service, NOW + timedelta(days=9))[0]["valid_until"]
-            == (NOW + timedelta(days=10)).isoformat()
+            context_facts(service, NOW + timedelta(days=12))[0]["value"]["text"]
+            == "Затем с 28 ноября пять постоянно"
         )
-        assert not context_facts(service, NOW + timedelta(days=12))
         assert (
             context_facts(service, NOW + timedelta(days=14))[0]["value"]["text"]
             == "Затем с 28 ноября пять постоянно"
@@ -135,7 +138,6 @@ def test_invalid_append_rejects_whole_batch_before_answer_or_writes():
         for changes in (
             {"valid_from": None},
             {"valid_from": NOW.isoformat()},
-            {"valid_from": (NOW + timedelta(days=6)).isoformat()},
             {"valid_from": head["valid_from"]},
             {"action": "revoke"},
             {"action": "clarify", "clarification": "Новый этап?"},
@@ -171,7 +173,7 @@ def test_implicit_append_resolves_existing_fact_id():
         service.answer("С 28 ноября пять тренировок")
         assert (
             context_facts(service, NOW + timedelta(days=10))[0]["value"]["text"]
-            == "С 21 ноября четыре тренировки"
+            == "С 28 ноября пять тренировок"
         )
 
 

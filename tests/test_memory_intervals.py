@@ -7,18 +7,20 @@ import tempfile
 import unittest
 from datetime import timedelta
 
+from support import seed_legacy_fact_versions
 from test_memory import NOW, error, extract, facts, fixture, operation
 from test_memory_revisions import context_facts, routine, schedule
 from test_memory_updates import initial_routine
 from test_topics import active, route
 
 from fitagent.memory import project
-from fitagent.memory_schema import FACT_CONFLICT_ERROR, STAGE_ORDER_ERROR, parse_extraction
+from fitagent.memory_schema import FACT_CONFLICT_ERROR, parse_extraction
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
 
 
 def scoped_budget(service, client, end=None):
+    """Load a legacy saved schedule; new chat turns no longer create deferred changes."""
     route(
         client,
         title="Меню",
@@ -50,6 +52,8 @@ def scoped_budget(service, client, end=None):
         ],
     )
     service.answer(quote)
+    pending = dict(facts(service)[0], valid_from=(NOW + timedelta(days=7)).isoformat())
+    seed_legacy_fact_versions(service.store, [original, pending])
     return original, facts(service)[0], active(service)
 
 
@@ -70,7 +74,7 @@ def update_budget(client, fact_id=None):
     return quote
 
 
-def test_crossing_or_equal_stage_start_rejects_whole_batch_without_cancelling_stages():
+def test_new_report_ignores_old_stage_order_and_commits_whole_batch():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         initial_routine(service, client)
@@ -81,13 +85,6 @@ def test_crossing_or_equal_stage_start_rejects_whole_batch_without_cancelling_st
             NOW + timedelta(days=14),
             update_mode="append",
         )
-        original = service.memory.repository.load(NOW)
-        topics = service.topics.repository.snapshot()
-        with store.connect() as db:
-            original_sources = [
-                tuple(row)
-                for row in db.execute("SELECT * FROM fact_sources ORDER BY fact_id,message_id")
-            ]
         for day in (0, 4, 7):
             quote = "Последний этап переносим, предыдущий этап не отменяем"
             extract(
@@ -95,28 +92,23 @@ def test_crossing_or_equal_stage_start_rejects_whole_batch_without_cancelling_st
                 operation("Есть гантели", category="equipment", key="dumbbells"),
                 routine(
                     quote,
-                    fact_id=facts(service)[0]["id"],
+                    fact_id=next(
+                        f["id"] for f in facts(service) if f["category"] == "training_routine"
+                    ),
                     valid_from=(NOW + timedelta(days=day)).isoformat(),
                 ),
             )
-            client.generate.reset_mock()
-            assert error(lambda: service.answer("Есть гантели. " + quote)) == STAGE_ORDER_ERROR
-            assert "позже начала предыдущего" in STAGE_ORDER_ERROR
-            assert service.memory.repository.load(NOW) == original
-            assert service.topics.repository.snapshot() == topics
-            client.generate.assert_not_called()
-        assert (
-            context_facts(service, NOW + timedelta(days=10))[0]["value"]["text"]
-            == "С 21 ноября четыре тренировки"
-        )
-        with store.connect() as db:
-            assert [
-                tuple(row)
-                for row in db.execute("SELECT * FROM fact_sources ORDER BY fact_id,message_id")
-            ] == original_sources
+            service.answer("Есть гантели. " + quote)
+            current = context_facts(service, NOW)
+            assert {f["category"] for f in current} == {"equipment", "training_routine"}
+            assert (
+                next(f for f in current if f["category"] == "training_routine")["value"]["text"]
+                == quote
+            )
+            assert not service.memory.repository.load(NOW)["previous_versions"]
 
 
-def test_valid_earlier_transfer_preserves_predecessor_and_exact_boundary():
+def test_new_future_date_does_not_keep_a_predecessor():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         initial_routine(service, client)
@@ -131,24 +123,24 @@ def test_valid_earlier_transfer_preserves_predecessor_and_exact_boundary():
         schedule(service, client, "Последний этап с 22 ноября", earlier)
         assert (
             context_facts(service, earlier - timedelta(microseconds=1))[0]["value"]["text"]
-            == "С 21 ноября четыре тренировки"
+            == "Последний этап с 22 ноября"
         )
         assert context_facts(service, earlier)[0]["value"]["text"] == "Последний этап с 22 ноября"
 
 
-def test_pending_transfer_cannot_erase_the_start_of_current_predecessor():
+def test_new_report_with_past_or_current_date_is_applied_now():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         initial_routine(service, client)
-        original = service.memory.repository.load(NOW)
         for stamp in (NOW, NOW - timedelta(days=1)):
             quote = "Переносим последний этап раньше"
             extract(
                 client,
                 routine(quote, fact_id=facts(service)[0]["id"], valid_from=stamp.isoformat()),
             )
-            assert error(lambda: service.answer(quote)) == STAGE_ORDER_ERROR
-            assert service.memory.repository.load(NOW) == original
+            service.answer(quote)
+            assert context_facts(service, NOW)[0]["value"]["text"] == quote
+            assert facts(service)[0]["valid_from"] == NOW.isoformat()
 
 
 def test_current_retained_budget_update_keeps_future_scoped_plan_and_survives_restart():

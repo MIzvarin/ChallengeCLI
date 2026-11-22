@@ -118,7 +118,7 @@ def test_profile_confirmation_keeps_the_context_and_uses_the_proposed_goal():
         assert "PRIOR_CONTEXT" in payload["dialogue"]
 
 
-def test_correcting_old_weight_keeps_its_date_and_does_not_replace_current_weight():
+def test_correcting_old_weight_requires_confirmation_then_latest_report_wins():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(profile())
@@ -143,16 +143,20 @@ def test_correcting_old_weight_keeps_its_date_and_does_not_replace_current_weigh
         )
         extract(client, correction)
         service.answer(correction["source_quote"])
+        assert service.current_profile()["weight"] == 79
+        service.chat("/confirm 1")
         rows = store.weights()
         assert [(r["confirmed_at"], r["weight"]) for r in rows] == [
             (NOW.isoformat(), 81),
             ((NOW + timedelta(days=1)).isoformat(), 79),
         ]
-        assert service.current_profile()["weight"] == 79
+        assert service.current_profile()["weight"] == 81
+        extract(client)
+        service.answer("Какой мой актуальный вес?")
         sent_profile, _ = json.JSONDecoder().raw_decode(
             client.generate.call_args.args[0][0]["content"].split("ПОЛНЫЕ ДАННЫЕ (JSON):\n")[1]
         )
-        assert sent_profile["profile"]["weight"] == 79
+        assert sent_profile["profile"]["weight"] == 81
         with store.connect() as db:
             record = db.execute(
                 "SELECT * FROM memory_journal WHERE lineage_id=? ORDER BY id DESC LIMIT 1",
@@ -178,6 +182,8 @@ def test_measurement_correction_can_still_explicitly_change_its_date():
         )
         extract(client, correction)
         service.answer(correction["source_quote"])
+        assert store.weights()[0]["confirmed_at"] == NOW.isoformat()
+        service.chat("/confirm 1")
         assert store.weights()[0]["confirmed_at"] == earlier
 
 

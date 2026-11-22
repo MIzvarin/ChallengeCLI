@@ -128,7 +128,13 @@ class ChatOnboarding:
 
     def candidate(self, state):
         memory = self.service.memory.repository.load(self.service.clock())
-        combined = {"journal": [], "sources": [], "retired": [], "notifications": []}
+        combined = {
+            "journal": [],
+            "sources": [],
+            "retired": [],
+            "notifications": [],
+            "activity": [],
+        }
         for field, (category, key, label) in FACT_FIELDS.items():
             source = state["sources"][field]
             text = state["answers"][field]

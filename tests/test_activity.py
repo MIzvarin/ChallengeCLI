@@ -68,6 +68,49 @@ def test_public_log_keeps_base_russian_labels_and_raw_audit():
         assert "PRIVATE_SECRET" in store.logs()  # The public view doesn't rewrite old records.
 
 
+def test_fact_value_update_and_freshness_confirmation_have_distinct_russian_labels():
+    for details, expected in (
+        (
+            {"action": "replaced", "fact_id": 9, "previous_fact_id": 6},
+            "Факт №9 обновлён",
+        ),
+        (
+            {"action": "confirmed", "fact_id": 9, "previous_fact_id": 9},
+            "Актуальность факта подтверждена  №9",
+        ),
+    ):
+        rendered = format_activity(
+            {
+                "created_at": NOW.isoformat(),
+                "kind": "fact_changed",
+                "details": json.dumps(dict(details, value="PRIVATE_SECRET")),
+            }
+        )
+        assert rendered == NOW.isoformat(timespec="seconds") + "  " + expected
+        assert "Факт заменён" not in rendered and "PRIVATE_SECRET" not in rendered
+
+
+def test_saved_fact_events_get_new_labels_without_rewriting_the_audit_or_calling_api():
+    with tempfile.TemporaryDirectory() as directory:
+        store, client, service = fixture(directory)
+        for action, previous in (("replaced", 6), ("confirmed", 9)):
+            store.event(
+                "fact_changed", {"action": action, "fact_id": 9, "previous_fact_id": previous}, NOW
+            )
+        raw_before = store.logs()
+        usage_before = store.token_usage()
+        reopened = Storage(directory)
+        public = reopened.activity_logs()
+        assert "Факт №9 обновлён" in public
+        assert "Актуальность факта подтверждена  №9" in public
+        assert "Факт заменён" not in public
+        assert reopened.logs() == raw_before
+        assert reopened.token_usage() == usage_before
+        client.generate.assert_not_called()
+        client.generate_structured.assert_not_called()
+        client.generate_safety.assert_not_called()
+
+
 def test_limit_is_applied_after_noise_and_unchanged_topics_are_filtered_out():
     with tempfile.TemporaryDirectory() as directory:
         store = Storage(directory)
@@ -254,10 +297,16 @@ async def safe_panel_flow():
                 assert "Не удалось загрузить журнал" in error_text
                 assert "PRIVATE_SECRET" not in error_text
             activities(store)
+            store.event(
+                "fact_changed", {"action": "replaced", "fact_id": 9, "previous_fact_id": 6}, NOW
+            )
+            store.event("fact_changed", {"action": "confirmed", "fact_id": 9}, NOW)
             panel.refresh_logs()
             await pilot.pause()
             text = "\n".join(line.text for line in panel.query_one("#events", RichLog).lines)
             assert "Checkpoint подключён" in text and "PRIVATE_SECRET" not in text
+            assert "Факт №9 обновлён" in text
+            assert "Актуальность факта подтверждена  №9" in text
 
 
 def test_public_log_panel_error_is_safe_and_recoverable():

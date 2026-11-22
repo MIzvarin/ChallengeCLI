@@ -39,6 +39,13 @@ REVIEW_DAYS = {
     "nutrition_plan": 14,
 }
 SAFETY_CATEGORIES = {"food_restrictions", "health_constraints"}
+CRITICAL_CATEGORIES = SAFETY_CATEGORIES | {
+    "medications",
+    "supplements",
+    "measurements",
+    "nutrition_plan",
+    "agreements",
+}
 MEMORY_LIMIT = 20_000
 MEMORY_ERROR = (
     "Не удалось проверить обновление памяти.\n"
@@ -151,7 +158,17 @@ nutrition_plan — принятый план, meal_routine — привычны�
 Один факт — одно независимо обновляемое сведение. value.text — краткое утверждение по-русски;
 quantity/unit — только явно сообщённое число и единица, иначе null; qualifier сохраняет
 «обычно», «примерно», «стараюсь», условия. Не превращай предпочтение в аллергию, намерение в действие.
-При повторе или перефразировании используй существующие category/key/scope и fact_id.
+При повторе или перефразировании используй существующие category/key/scope и fact_id;
+сохраняй прежнее нормализованное value, если смысл и условия не изменились.
+Номер факта постоянный: обновляй существующий fact_id, не создавай другой факт только
+из-за изменения значения. Историю значений ведёт приложение в отдельном журнале.
+Взаимоисключающие сведения об одном предмете сопоставляй существующему факту,
+не обходи противоречие новым key. Аллергия и «аллергии нет» об одном продукте — один факт.
+Изменения критичных сведений (ограничения, препараты, измерения, принятые планы)
+приложение сначала предложит подтвердить: upsert/revoke здесь только предложение.
+Если новое значение понятно, верни его в upsert; если непонятно, задай clarify.
+Согласие на замену критичных сведений принимается командой /confirm из предложения,
+а не предположением модели по короткому «да».
 key — стабильный английский snake_case по предмету, не по значению (sessions_per_week, не three_days).
 scope=usual для обычного режима. Временное исключение имеет другой scope (например trip_20261114),
 не заменяет обычный режим. Совместимые предметы (гантели и резинки) имеют разные key.
@@ -159,15 +176,12 @@ upsert обновляет лишь при ясном изменении или �
 с существующим fact_id. При неоднозначном конфликте с существующим фактом используй clarify
 с его fact_id и вопросом clarification,
 не перезаписывая старое значение. В остальных действиях clarification=null.
-update_mode=replace — исправление/подтверждение факта, перенос даты или замена последнего
-запланированного этапа. append — только явно добавленный следующий этап того же сведения:
-сохрани все предыдущие этапы, включая ещё не начавшиеся. Для append нужны существующий факт
-и явный valid_from в будущем, строго позже начала последнего этапа. Если уже сохранено «с 21 ноября
-четыре тренировки», новый запрос «затем с 28 ноября пять» — append, не перенос первого на 28-е.
-«Вместо 21-го начнём 28-го» — replace. Если добавление или исправление неоднозначно,
-используй clarify с вопросом, не отменяй этапы догадкой. Для нового факта, revoke и clarify — replace.
-При переносе последнего этапа его начало должно остаться позже начала предыдущего:
-не отменяй и не переставляй предыдущие этапы автоматически.
+Приоритет имеет последнее сообщение пользователя, а не дата описываемого события.
+Изменения применяются сразу, даже при упоминании будущего начала: новая редакция
+заменяет прежний режим без отложенных этапов. Всегда используй update_mode=replace.
+Для неизмерительных фактов valid_from=null: начало применения задаёт приложение.
+Для измерений сохраняй реальную дату измерения, но актуальным становится последнее
+сообщённое/исправленное измерение показателя, даже если его дата раньше других.
 На один факт допускается только одна операция в ответе: следующие этапы добавляются отдельными
 сообщениями. Не возвращай одновременно неявное обновление и операцию с номером того же факта.
 valid_from/valid_until — ISO 8601 с часовым поясом. valid_from=null, если начало не указано.
@@ -175,13 +189,9 @@ valid_until_action=keep и valid_until=null, если пользователь �
 прежний срок сохраняется. set с непустым valid_until задаёт новый срок. clear с valid_until=null
 снимает срок только при явном «постоянно», «бессрочно» или равнозначном указании пользователя.
 Для нового факта keep означает отсутствие срока. Относительные даты вычисляй от даты сообщения.
-previous_versions — прежние версии, действующие до отложенной замены. Обычно изменяется
-последний этап из existing_facts. Если сейчас меняется ещё действующая прежняя версия,
-а последний этап имеет ДРУГУЮ область применения, используй номер этой прежней версии
-и update_mode=replace, сохрани её category/key/scope/applicability/topic_id. Её текущее значение
-обновится отдельно, не отменяя запланированный этап другой области. Не используй previous_versions
-для append, revoke, clarify или изменения их области применения. Не переноси сроки прежних версий
-в новые без указания пользователя. Для обычного подтверждения не создавай новый будущий план.
+previous_versions — действующие версии из старых сохранённых расписаний. При исправлении
+используй подходящий fact_id и сохрани category/key/scope/applicability/topic_id.
+Последнее сообщение применяется сразу; старые даты не должны восстановить отменённое значение.
 У food_restrictions и health_constraints valid_until всегда null: давность не отменяет ограничение.
 Неуказанные сроки не выдумывай. Если полезных изменений нет, operations=[].
 """
@@ -279,6 +289,35 @@ def validate_update_mode(operation, target, now):
 
 def identity(item):
     return tuple(item[key] for key in ("category", "key", "scope", "applicability", "topic_id"))
+
+
+def reported_order(fact):
+    """Newest user report wins, independently of the date of the reported event."""
+    return parse_stamp(fact["updated_at"]), fact.get("source_message_id") or 0, fact["id"]
+
+
+def critical_change(operation, old):
+    if old is None or old["category"] not in CRITICAL_CATEGORIES:
+        return False
+    if operation["action"] == "revoke":
+        return True
+    if operation["action"] != "upsert":
+        return False
+    end = {
+        "keep": old["valid_until"],
+        "set": operation["valid_until"],
+        "clear": None,
+    }[operation["valid_until_action"]]
+    return (
+        old["value"] != operation["value"]
+        or identity(old) != identity(operation)
+        or parse_stamp(end) != parse_stamp(old["valid_until"])
+        or (
+            old["category"] == "measurements"
+            and operation["valid_from"] is not None
+            and parse_stamp(operation["valid_from"]) != parse_stamp(old["valid_from"])
+        )
+    )
 
 
 def effective_end(fact):
@@ -380,13 +419,12 @@ def parse_extraction(text, question, facts, now, previous_versions=()):
                 raise ValueError
             if (operation["valid_until_action"] == "set") != (operation["valid_until"] is not None):
                 raise ValueError
-            start = parse_stamp(operation["valid_from"]) or now
+            supplied_start = parse_stamp(operation["valid_from"])
+            start = (supplied_start or now) if operation["category"] == "measurements" else now
             end = parse_stamp(operation["valid_until"])
             if end is not None and end <= start:
                 raise ValueError
             if operation["category"] in SAFETY_CATEGORIES and end is not None:
-                raise ValueError
-            if operation["category"] in SAFETY_CATEGORIES and start > now:
                 raise ValueError
             validate_update_mode(operation, target, now)
         return data["operations"]

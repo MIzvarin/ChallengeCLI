@@ -298,7 +298,7 @@ def test_explicit_correction_replaces_old_value_but_not_profile():
         service.clock = lambda: NOW + timedelta(days=1)
         service.answer("Теперь люблю брокколи")
         current = facts(service)[0]
-        assert current["id"] != first["id"]
+        assert current["id"] == first["id"]
         assert current["value"]["text"] == "Теперь люблю брокколи"
         assert current["valid_from"] == (NOW + timedelta(days=1)).isoformat()
         with store.connect() as db:
@@ -307,10 +307,9 @@ def test_explicit_correction_replaces_old_value_but_not_profile():
                 for r in db.execute(
                     "SELECT status FROM sticky_facts WHERE category!='measurements' ORDER BY id"
                 )
-            ] == [
-                "replaced",
-                "active",
-            ]
+            ] == ["active"]
+        history = service.memory.command(f"/memory history {first['id']}")
+        assert "Не люблю брокколи" in history and "Теперь люблю брокколи" in history
         assert store.latest("profiles") == profile and store.latest("goals") == goal
 
 
@@ -333,7 +332,7 @@ def test_complementary_items_and_temporary_exception_do_not_replace_usual():
         extract(client, *items)
         service.answer("; ".join(item["source_quote"] for item in items))
         assert len(facts(service)) == 4
-        assert len(json.loads(service.memory.context())["facts"]) == 3
+        assert len(json.loads(service.memory.context())["facts"]) == 4
         service.memory.clock = lambda: NOW + timedelta(days=1)
         assert len(json.loads(service.memory.context())["facts"]) == 4
         service.memory.clock = lambda: NOW + timedelta(days=2)

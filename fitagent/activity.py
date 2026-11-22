@@ -13,6 +13,10 @@ ACTIVITY_KINDS = (
     "safety_checked",
     "safety_failed",
     "memory_failed",
+    "fact_changed",
+    "fact_change_pending",
+    "profile_updated",
+    "goal_plan_updated",
 )
 SAFETY_STAGES = {
     "onboarding": "первичное заполнение профиля",
@@ -32,7 +36,42 @@ def integer(value, minimum=0):
 def activity_message(kind, details):
     if not isinstance(details, dict):
         return None
-    if kind == "topic_routed":
+    if kind == "fact_changed":
+        action = {
+            "added": "Факт добавлен",
+            "replaced": "Факт обновлён",
+            "updated": "Факт обновлён",
+            "confirmed": "Актуальность факта подтверждена",
+            "revoked": "Факт отозван",
+            "deleted": "Факт удалён",
+        }.get(details.get("action"))
+        fact_id, previous = details.get("fact_id"), details.get("previous_fact_id")
+        if not action or not integer(fact_id, 1):
+            return None
+        if details.get("action") == "replaced":
+            if not integer(previous, 1) or previous == fact_id:
+                return None
+            return f"Факт №{fact_id} обновлён"
+        if details.get("action") == "updated":
+            return f"Факт №{fact_id} обновлён"
+        return f"{action}  №{fact_id}"
+    elif kind == "fact_change_pending":
+        action_id, ids = details.get("action_id"), details.get("fact_ids")
+        if (
+            integer(action_id, 1)
+            and isinstance(ids, list)
+            and ids
+            and all(integer(i, 1) for i in ids)
+            and len(ids) == len(set(ids))
+        ):
+            return f"Уточнение замены фактов  номера: {', '.join(str(i) for i in ids)} · предложение №{action_id}"
+    elif kind == "profile_updated":
+        profile_id, goal_id = details.get("profile_id"), details.get("goal_id")
+        if integer(profile_id, 1) and integer(goal_id, 1):
+            return f"Профиль обновлён  снимок №{profile_id} · цель №{goal_id}"
+    elif kind == "goal_plan_updated" and integer(details.get("goal_id"), 1):
+        return f"План цели обновлён  цель №{details['goal_id']}"
+    elif kind == "topic_routed":
         previous, current = details.get("previous_topic_id"), details.get("topic_id")
         action = {
             "switch": "новая тема",

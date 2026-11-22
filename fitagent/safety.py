@@ -40,6 +40,12 @@ class SafetyGuard:
             raise ValueError("Нельзя отключить блокировку для этой проверки безопасности.")
         rules = safety_rules(snapshot, self.clock())
         previous_rules = safety_rules(previous_snapshot, self.clock()) if previous_snapshot else []
+        current_rules = {rule["rule_id"]: rule for rule in rules}
+        for rule in previous_rules:
+            current = current_rules.get(rule["rule_id"])
+            if current is not None and current["value"] != rule["value"]:
+                # One stable fact number must not collapse old/new safety checks into one.
+                rule["rule_id"] = "previous:" + rule["rule_id"].split(":", 1)[1]
         proposed_rules = [
             {
                 "rule_id": f"proposed:{index}",
@@ -47,7 +53,8 @@ class SafetyGuard:
                 "value": operation["value"],
             }
             for index, operation in enumerate(changes if isinstance(changes, list) else [])
-            if operation["category"] in SAFETY_CATEGORIES and operation["action"] == "upsert"
+            if operation["category"] in SAFETY_CATEGORIES | {"medications", "supplements"}
+            and operation["action"] == "upsert"
         ]
         required_rules = list(
             dict.fromkeys(

@@ -3,7 +3,7 @@
 import json
 import math
 
-from fitagent.memory_schema import parse_stamp
+from fitagent.memory_schema import parse_stamp, reported_order
 
 
 def initialize_state(db):
@@ -30,6 +30,14 @@ def initialize_state(db):
     ):
         if name not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    # Old databases may predate per-fact journals. Record the state observed now,
+    # not an invented sequence of historical changes, and never rewrite an existing journal.
+    db.execute(
+        "INSERT INTO memory_journal(lineage_id,recorded_at,effective_at,action,new_value,source_message_id) "
+        "SELECT f.lineage_id,strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),f.valid_from,'snapshot',f.value,f.source_message_id "
+        "FROM sticky_facts f WHERE f.id=(SELECT MAX(v.id) FROM sticky_facts v WHERE v.lineage_id=f.lineage_id) "
+        "AND NOT EXISTS(SELECT 1 FROM memory_journal j WHERE j.lineage_id=f.lineage_id)"
+    )
 
 
 def bump_revision(db):
@@ -52,6 +60,13 @@ def journal(db, lineage_id, now, effective_at, action, old, new, message_id=None
             json.dumps(new, ensure_ascii=False) if new is not None else None,
             message_id,
         ),
+    )
+
+
+def record_activity(db, kind, details, stamp):
+    db.execute(
+        "INSERT INTO events(created_at,kind,details) VALUES (?,?,?)",
+        (stamp, kind, json.dumps(details, ensure_ascii=False)),
     )
 
 
@@ -87,21 +102,22 @@ def profile_weight(db, weight, stamp, profile_id, source_id=None):
     journal(
         db, fact_id, stamp, measured_at, "measurement", None, value, source_id if source else None
     )
+    record_activity(db, "fact_changed", {"action": "added", "fact_id": fact_id}, stamp)
     bump_revision(db)
 
 
 def current_weight(db):
-    rows = weight_rows(db, 1)
+    rows = weight_rows(db, 1, by_report=True)
     if rows:
         return {"weight": rows[0]["weight"], "measured_at": rows[0]["confirmed_at"]}
     return None
 
 
-def weight_rows(db, limit=30):
+def weight_rows(db, limit=30, by_report=False):
     try:
         records = []
         for row in db.execute(
-            "SELECT id,value,valid_from FROM sticky_facts WHERE category='measurements' AND fact_key LIKE 'weight_%' AND status='active'"
+            "SELECT id,value,valid_from,updated_at,source_message_id FROM sticky_facts WHERE category='measurements' AND fact_key LIKE 'weight_%' AND status='active'"
         ):
             value = json.loads(row["value"])["quantity"]
             if (
@@ -111,8 +127,9 @@ def weight_rows(db, limit=30):
             ):
                 raise ValueError
             stamp = parse_stamp(row["valid_from"])
-            records.append((stamp, row["id"], {"confirmed_at": row["valid_from"], "weight": value}))
-        return [item[2] for item in sorted(records, key=lambda item: item[:2])[-limit:]]
+            order = reported_order(dict(row)) if by_report else (stamp, row["id"])
+            records.append((order, {"confirmed_at": row["valid_from"], "weight": value}))
+        return [item[1] for item in sorted(records, key=lambda item: item[0])[-limit:]]
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
         raise RuntimeError(
             "Не удалось прочитать измерения веса. Проверьте данные или восстановите базу из резервной копии."

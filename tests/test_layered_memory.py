@@ -110,7 +110,7 @@ def test_birth_date_is_validated_and_age_changes_without_overwriting_birth_date(
         assert service.current_profile()["birth_date"] == "2000-11-10"
 
 
-def test_weight_measurements_are_dated_facts_and_backdated_values_do_not_replace_latest():
+def test_weight_measurements_keep_dates_but_latest_report_has_priority():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(profile())
@@ -131,9 +131,9 @@ def test_weight_measurements_are_dated_facts_and_backdated_values_do_not_replace
             extract(client, item)
             assert "Память обновлена" in service.answer(item["source_quote"])
         assert [row["weight"] for row in store.weights()] == [82, 80, 79]
-        assert service.current_profile()["weight"] == 79
+        assert service.current_profile()["weight"] == 82
         current = json.loads(service.memory.context())["measurements"]
-        assert current[0]["value"]["quantity"] == 79
+        assert current[0]["value"]["quantity"] == 82
 
 
 def test_profile_goal_change_is_proposed_checked_and_confirmed_without_fake_weight_measurement():
@@ -316,9 +316,13 @@ def test_revoking_the_last_measurement_does_not_resurrect_the_profile_copy():
         )
         extract(client, item)
         service.answer(item["source_quote"])
+        assert store.weights()
+        service.chat("/confirm 1")
         assert store.weights() == []
         assert service.current_profile()["weight"] is None
         assert "не указан" in service.profile_text()
+        extract(client)
+        service.answer("Какой мой вес?")
         sent = client.generate.call_args.args[0][0]["content"]
         assert '"weight": null' in sent
 
