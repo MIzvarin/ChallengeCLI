@@ -17,7 +17,32 @@ ACTIVITY_KINDS = (
     "fact_change_pending",
     "profile_updated",
     "goal_plan_updated",
+    "mcp_started",
+    "mcp_finished",
+    "mcp_failed",
+    "mcp_search_retry",
+    "nutrition_cart_skipped",
 )
+MCP_OPERATIONS = {"search": "поиск товаров", "cart_link": "создание ссылки на корзину"}
+MCP_RETRY_REASONS = {
+    "timeout": "истекло время ожидания",
+    "network": "сбой соединения",
+    "rate_limit": "слишком много запросов",
+    "server": "временная ошибка сервера",
+}
+CART_SKIP_REASONS = {
+    "invalid_queries": "не удалось подготовить безопасные поисковые названия",
+    "no_products": "подходящие товары не найдены",
+    "product_data": "недостаточно данных о составе, КБЖУ или единицах продажи",
+    "catalog_limit": "каталог превысил допустимый размер",
+    "selection_error": "не удалось проверить подбор товаров",
+    "incomplete_selection": "полный подходящий набор не найден",
+    "quantity_error": "не удалось рассчитать количества упаковок",
+    "product_conflict": "карточки или единицы одного товара не совпадают",
+    "budget": "закупка превышает указанный бюджет",
+    "mcp_error": "не удалось получить товары из MCP",
+    "link_error": "не удалось получить ссылку на корзину",
+}
 SAFETY_STAGES = {
     "onboarding": "первичное заполнение профиля",
     "request": "запрос",
@@ -36,6 +61,30 @@ def integer(value, minimum=0):
 def activity_message(kind, details):
     if not isinstance(details, dict):
         return None
+    if kind == "mcp_search_retry":
+        attempt, code = details.get("attempt"), details.get("reason")
+        reason = MCP_RETRY_REASONS.get(code) if isinstance(code, str) else None
+        if reason and integer(attempt, 2) and attempt <= 3:
+            return f"MCP ВкусВилла  повтор поиска · попытка {attempt} из 3 · {reason}"
+        return None
+    if kind in {"mcp_started", "mcp_finished", "mcp_failed"}:
+        code = details.get("operation")
+        operation = MCP_OPERATIONS.get(code) if isinstance(code, str) else None
+        if not operation:
+            return None
+        if kind == "mcp_started":
+            return f"MCP ВкусВилла  {operation} · начато"
+        if kind == "mcp_failed":
+            return f"Ошибка MCP ВкусВилла  {operation} · запрос не выполнен"
+        count = details.get("count")
+        if integer(count) and count <= 100:
+            label = "найдено товаров" if code == "search" else "позиций в корзине"
+            return f"MCP ВкусВилла  {operation} · завершено · {label}: {count}"
+        return None
+    if kind == "nutrition_cart_skipped":
+        code = details.get("reason")
+        reason = CART_SKIP_REASONS.get(code) if isinstance(code, str) else None
+        return f"Корзина ВкусВилла не собрана  {reason}" if reason else None
     if kind == "fact_changed":
         action = {
             "added": "Факт добавлен",

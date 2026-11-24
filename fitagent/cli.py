@@ -7,9 +7,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from fitagent.nutrition import NutritionShopping
 from fitagent.provider import ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
+from fitagent.vkusvill import VkusvillClient
 
 
 def main():
@@ -47,4 +49,5 @@ def main():
     )
     from fitagent.ui import FitAgentApp
 
-    FitAgentApp(FitnessService(store, client)).run()
+    nutrition = NutritionShopping(client, VkusvillClient(audit=audit), audit=audit)
+    FitAgentApp(FitnessService(store, client, nutrition=nutrition)).run()

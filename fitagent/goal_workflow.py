@@ -332,6 +332,7 @@ class GoalWorkflow:
                 "required_information": missing,
                 "current_user_message": question,
                 "dialogue": history,
+                "nutrition_request": memory.get("nutrition_request"),
             }
         )
         if proposal["action"] == "continue":

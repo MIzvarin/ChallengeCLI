@@ -45,7 +45,14 @@ def test_real_client_sends_the_bounded_schema_without_extra_requests_or_larger_t
             raw = client.generate_safety(messages, "response")
             assert parse_safety(raw, required, exact=True)["status"] == "allow"
             payload = transport.post.call_args.kwargs["json"]
-            checks = payload["text"]["format"]["schema"]["properties"]["checks"]
+            schema = payload["text"]["format"]["schema"]
+            # Emit the verdict only after all rule checks, but keep rejecting mismatches.
+            assert (
+                list(schema["properties"])
+                == schema["required"]
+                == ["checks", "status", "description"]
+            )
+            checks = schema["properties"]["checks"]
             assert checks["minItems"] == checks["maxItems"] == len(required)
             assert checks["items"]["properties"]["rule_id"]["enum"] == required
             assert payload["max_output_tokens"] == MEMORY_OUTPUT_LIMIT == 8192

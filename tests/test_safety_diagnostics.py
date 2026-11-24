@@ -34,7 +34,7 @@ def test_shape_and_json_diagnostics_distinguish_failures_without_logging_values(
         ("PRIVATE invalid json", "invalid_json", None),
         ('{"PRIVATE":"a","PRIVATE":"b"}', "duplicate_json_key", None),
         (json.dumps({"PRIVATE": "secret"}), "invalid_fields", "$"),
-        (safety_json(status="PRIVATE"), "invalid_enum", "$.status"),
+        (json.dumps(json.loads(safety_json()) | {"status": "PRIVATE"}), "invalid_enum", "$.status"),
     )
     for raw, reason, field in cases:
         details = failure(raw)

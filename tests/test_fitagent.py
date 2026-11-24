@@ -17,7 +17,8 @@ from textual.widgets import Input, RichLog, Static
 from fitagent.domain import SYSTEM_PROMPT, bmi_warning, token_bound, validate_profile
 from fitagent.loader import ResponseLoader
 from fitagent.logs import LogsPanel
-from fitagent.provider import ModelClient
+from fitagent.nutrition_schema import SELECTION_SCHEMA
+from fitagent.provider import MEMORY_OUTPUT_LIMIT, ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
 from fitagent.ui import FitAgentApp
@@ -337,6 +338,43 @@ def test_transport_and_cache_metrics():
         )
         expect_error(lambda: client.generate([], 1024, "answer"))
     assert "SECRET" not in json.dumps(audits)
+
+
+def test_catalog_selection_uses_provider_output_limit():
+    audits = []
+    client = ModelClient(
+        "SECRET",
+        "https://example.test/chat",
+        "flash",
+        "stable",
+        lambda *event: audits.append(event),
+    )
+    with patch("fitagent.provider.httpx.Client") as factory:
+        transport = factory.return_value.__enter__.return_value
+        transport.post.return_value = httpx.Response(
+            200,
+            json={
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": '{"items":[]}'}],
+                    }
+                ],
+            },
+        )
+        assert client.generate_structured([], SELECTION_SCHEMA, "nutrition_selection") == (
+            '{"items":[]}'
+        )
+        payload = transport.post.call_args.kwargs["json"]
+        assert "max_output_tokens" not in payload
+        assert payload["text"]["format"]["strict"] is True
+        assert payload["text"]["format"]["schema"] == SELECTION_SCHEMA
+        assert audits[-2][1]["output_limit"] is None
+        client.generate_structured([], {}, "memory_extraction")
+        assert transport.post.call_args.kwargs["json"]["max_output_tokens"] == MEMORY_OUTPUT_LIMIT
 
 
 async def tui_flow():

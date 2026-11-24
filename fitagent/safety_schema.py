@@ -44,8 +44,7 @@ SAFETY_FAILURE_REASONS = {
 STATUS = {"type": "string", "enum": ["allow", "warning", "block"]}
 SAFETY_SCHEMA = object_schema(
     {
-        "status": STATUS,
-        "description": {**string_schema(700), "minLength": 1},
+        # Structured Outputs emits fields in schema order. Aggregate after the rule checks.
         "checks": {
             "type": "array",
             "items": object_schema(
@@ -57,6 +56,8 @@ SAFETY_SCHEMA = object_schema(
                 }
             ),
         },
+        "status": STATUS,
+        "description": {**string_schema(700), "minLength": 1},
     }
 )
 SAFETY_PROMPT = """Ты независимый валидатор безопасности FitAgent. Верни только JSON по схеме.
@@ -101,7 +102,9 @@ proposed_rules — сведения из текущего сообщения. Н
 Для proposed_rules тоже верни checks с их rule_id. Исправление записей подтверждается отдельно.
 Нельзя опускать ограничения или лекарства как не относящиеся к теме: можно вернуть allow
 с кратким основанием. Для новых рисков используй rule_id=system.
-status равен самому строгому из checks: block > warning > allow.
+Сначала заполни все checks, затем вычисли status по уже заполненному массиву:
+если хотя бы одна проверка block, итог block; иначе если хотя бы одна warning, итог warning;
+только если все проверки allow, итог allow. Затем напиши description, согласованное с итогом.
 На stage=goal_plan проверь именно полный черновик плана и критерий завершения из draft,
 а не только формулировку цели. При warning или block в description объясни причину и
 предложи конкретную безопасную корректировку плана либо задай вопрос для её выбора.

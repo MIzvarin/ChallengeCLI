@@ -37,13 +37,13 @@ class ModelClient:
 
     def generate_structured(self, messages, schema, purpose="memory_extraction"):
         """No fallback to JSON mode/plain text and no automatic paid retries."""
+        output_limit = None if purpose == "nutrition_selection" else MEMORY_OUTPUT_LIMIT
         payload = {
             "model": MEMORY_MODEL,
             "input": messages,
             "stream": False,
             "store": False,
             "reasoning": {"effort": "none"},
-            "max_output_tokens": MEMORY_OUTPUT_LIMIT,
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -53,7 +53,9 @@ class ModelClient:
                 }
             },
         }
-        data = self._post(MEMORY_URL, payload, purpose, MEMORY_MODEL, MEMORY_OUTPUT_LIMIT)
+        if output_limit is not None:
+            payload["max_output_tokens"] = output_limit
+        data = self._post(MEMORY_URL, payload, purpose, MEMORY_MODEL, output_limit)
         failure_reason = "response_protocol"
         try:
             if data["status"] != "completed":
