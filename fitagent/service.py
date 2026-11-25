@@ -10,11 +10,13 @@ from fitagent.domain import (
     age_on,
     bmi_warning,
     next_check,
+    profile_for_model,
     reminder_due,
     token_bound,
     validate_profile,
 )
 from fitagent.goal_workflow import ACCEPT_PLAN, GoalWorkflow
+from fitagent.meal_plan import plan_from_context
 from fitagent.memory import CONTEXT_RULES, FactMemory
 from fitagent.memory_schema import reported_order
 from fitagent.onboarding import ChatOnboarding
@@ -26,8 +28,9 @@ SUMMARY_LIMIT = 20_000
 
 
 class FitnessService:
-    def __init__(self, store, client, clock=None, nutrition=None):
+    def __init__(self, store, client, clock=None, nutrition=None, chat_plan=None):
         self.store, self.client = store, client
+        self.chat_plan = chat_plan
         self.nutrition = nutrition
         self.clock = clock or (lambda: datetime.now().astimezone())
         self.memory = FactMemory(store, client, self.clock)
@@ -56,10 +59,13 @@ class FitnessService:
             if profile["weight"] is not None
             else "не указан — сообщите в чате"
         )
+        weight_date = "измерен " + (profile.get("measured_at") or "дата не указана")
+        if profile.get("weight_recorded_at"):
+            weight_date = f"записан в профиле {profile['weight_recorded_at'][:10]}"
         return (
             f"Профиль (только чтение)\nДата рождения: {profile['birth_date']} · {profile['age']} лет\n"
             f"Пол: {profile['sex']} · рост: {profile['height']:g} см\n"
-            f"Вес: {weight} · измерен {profile.get('measured_at') or 'дата не указана'}\n"
+            f"Вес: {weight} · {weight_date}\n"
             f"Цель: {goal.get('text', 'не задана')} · целевой вес: {goal.get('target') or 'не задан'}\n"
             "Чтобы изменить данные, напишите об этом в чате. /memory — факты и журналы."
         )
@@ -74,7 +80,8 @@ class FitnessService:
         if weights:
             newest = max(weights, key=reported_order)
             profile.update(weight=newest["value"]["quantity"], measured_at=newest["valid_from"])
-        else:
+            profile.pop("weight_recorded_at", None)
+        elif not profile.get("weight_recorded_at"):
             profile.update(weight=None, measured_at=None)
         return profile
 
@@ -135,10 +142,15 @@ class FitnessService:
         self.audit("profile_saved", {"goal_risk_confirmed": bool(warning and confirmed)})
 
     def system(self, profile=None):
-        if profile is not None:
-            data = profile
+        if profile is None:
+            data = {
+                "profile": profile_for_model(self.current_profile()),
+                "goal": self.store.latest("goals"),
+            }
+        elif "profile" in profile:
+            data = dict(profile, profile=profile_for_model(profile["profile"]))
         else:
-            data = {"profile": self.current_profile(), "goal": self.store.latest("goals")}
+            data = profile_for_model(profile)
         return SYSTEM_PROMPT + "\nПОЛНЫЕ ДАННЫЕ (JSON):\n" + json.dumps(data, ensure_ascii=False)
 
     def request(self, system, text, purpose, output=None):
@@ -280,7 +292,38 @@ class FitnessService:
         )
         return compacted
 
-    def answer(self, question, *, manage_goal=False):
+    def nutrition_context(self, question, history, profile, goal, memory, *, explicit_plan=False):
+        topic = memory["dialogue"]
+        payload = {
+            "question": question,
+            "dialogue": history,
+            "profile": profile_for_model(profile),
+            "goal": goal,
+            "goal_state": self.workflow.state(goal) if goal else None,
+            "facts": json.loads(
+                self.memory.context(
+                    memory, topic_id=topic["topic_id"], related_topic_ids=topic["related_topic_ids"]
+                )
+            ),
+        }
+        pending = (
+            None
+            if explicit_plan
+            else self.memory.repository.pending_menu(memory["source_message_id"])
+        )
+        route = self.nutrition.plan_route(payload, pending) if explicit_plan or pending else None
+        if pending and route:
+            payload["menu_request"] = pending["request"]
+        payload["nutrition_request"] = route or self.nutrition.route(payload)
+        return payload
+
+    def audit_context(self, plan, facts):
+        for checkpoint in plan["used_checkpoints"]:
+            self.audit("checkpoint_used", checkpoint)
+        if facts:
+            self.audit("facts_read", {"fact_ids": [fact["id"] for fact in facts]})
+
+    def answer(self, question, *, manage_goal=False, explicit_plan=False):
         question = question.strip()
         if not question:
             raise ValueError("Введите вопрос.")
@@ -302,22 +345,10 @@ class FitnessService:
             nutrition_request = {"action": "none"}
             nutrition_payload, safety_result = None, None
             if self.nutrition:
-                nutrition_payload = {
-                    "question": question,
-                    "dialogue": history,
-                    "profile": profile,
-                    "goal": goal,
-                    "goal_state": self.workflow.state(goal) if goal else None,
-                    "facts": json.loads(
-                        self.memory.context(
-                            memory,
-                            topic_id=plan["topic_id"],
-                            related_topic_ids=plan["related_topic_ids"],
-                        )
-                    ),
-                }
-                nutrition_request = self.nutrition.route(nutrition_payload)
-                nutrition_payload["nutrition_request"] = nutrition_request
+                nutrition_payload = self.nutrition_context(
+                    question, history, profile, goal, memory, explicit_plan=explicit_plan
+                )
+                nutrition_request = nutrition_payload["nutrition_request"]
             if nutrition_request["action"] != "none":
                 memory["nutrition_request"] = nutrition_request
                 safety_result = self.safety.check(
@@ -330,6 +361,20 @@ class FitnessService:
                     dialogue=history,
                 )
                 if nutrition_request["action"] == "clarify":
+                    if explicit_plan or "menu_request" in nutrition_payload:
+                        memory["pending_menu"] = {
+                            "request": nutrition_payload.get("menu_request", question),
+                            **{
+                                key: nutrition_request[key]
+                                for key in (
+                                    "period",
+                                    "food_format",
+                                    "goal_related",
+                                    "cheaper",
+                                    "budget_rub",
+                                )
+                            },
+                        }
                     self.actions.prepare(memory, question, dialogue=history)
                     response = self.checked_answer(
                         question,
@@ -344,6 +389,31 @@ class FitnessService:
             independent_menu = (
                 nutrition_request["action"] == "shop" and not nutrition_request["goal_related"]
             )
+            if independent_menu and (explicit_plan or self.chat_plan):
+                self.actions.prepare(memory, question, dialogue=history)
+                nutrition_payload["safety"] = safety_result
+                context = nutrition_payload["facts"]
+                self.audit_context(plan, context["facts"] + context["measurements"])
+                shop = not self.pending_nutrition_changes(memory)
+                if explicit_plan:
+                    response = plan_from_context(self, nutrition_payload, memory, shop=shop)
+                else:
+                    response = self.chat_plan(
+                        {
+                            "payload": nutrition_payload,
+                            "memory": {
+                                key: memory[key]
+                                for key in (
+                                    "facts",
+                                    "previous_versions",
+                                    "operations",
+                                    "notifications",
+                                )
+                            },
+                            "shop": shop,
+                        }
+                    )
+                return self.workflow.complete(memory, message_id, response)
             if manage_goal and not independent_menu:
                 memory["goal_managed"] = True
                 response = self.workflow.handle(goal, question, memory, profile, history)
@@ -360,7 +430,9 @@ class FitnessService:
                         and not self.pending_nutrition_changes(memory)
                     ):
                         nutrition_payload["goal_state"] = state
-                        proposal = self.nutrition.prepare(nutrition_payload, state["plan"])
+                        proposal = self.nutrition.prepare(
+                            nutrition_payload, state["plan"], catalog_terms_only=True
+                        )
                         if proposal:
                             response = self.checked_answer(
                                 question,
@@ -395,11 +467,7 @@ class FitnessService:
                 related_topic_ids=plan["related_topic_ids"],
                 include_safety=False,
             )
-            for checkpoint in plan["used_checkpoints"]:
-                self.audit("checkpoint_used", checkpoint)
-            included_facts = json.loads(fact_context)["facts"]
-            if included_facts:
-                self.audit("facts_read", {"fact_ids": [fact["id"] for fact in included_facts]})
+            self.audit_context(plan, json.loads(fact_context)["facts"])
             system += "\n" + CONTEXT_RULES + "\n" + TOPIC_CONTEXT_RULES
             if nutrition_request["action"] == "shop":
                 system += (
@@ -418,7 +486,11 @@ class FitnessService:
                 "answer",
             )
             proposal = (
-                self.nutrition.prepare(nutrition_payload, response)
+                self.nutrition.prepare(
+                    nutrition_payload,
+                    response,
+                    catalog_terms_only=nutrition_request["goal_related"],
+                )
                 if nutrition_request["action"] == "shop"
                 and not self.pending_nutrition_changes(memory)
                 else None

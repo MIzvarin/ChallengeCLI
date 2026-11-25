@@ -170,6 +170,18 @@ class FactRepository:
             "revision": int(revision[0]) if revision else 0,
         }
 
+    def pending_menu(self, before_id):
+        with self.store.connect() as db:
+            row = db.execute("SELECT value FROM chat_state WHERE key='pending_menu'").fetchone()
+            if row:
+                pending = json.loads(row[0])
+                previous = db.execute(
+                    "SELECT MAX(id) FROM messages WHERE id<? AND status='complete'", (before_id,)
+                ).fetchone()[0]
+                if pending["assistant_id"] == previous:
+                    return pending
+        return None
+
     def previous_exchange(self, before_id):
         """Only the immediately preceding completed turn, never a bulk archive export."""
         with self.store.connect() as db:
@@ -325,6 +337,12 @@ class FactRepository:
                 "INSERT INTO messages(day,created_at,role,content,status) VALUES (?,?,'assistant',?,'complete')",
                 (now.date().isoformat(), now.isoformat(), response),
             )
+            db.execute("DELETE FROM chat_state WHERE key='pending_menu'")
+            if snapshot.get("pending_menu"):
+                pending = dict(snapshot["pending_menu"], assistant_id=assistant.lastrowid)
+                db.execute(
+                    "INSERT INTO chat_state VALUES ('pending_menu',?)", (json.dumps(pending),)
+                )
             if "dialogue" in snapshot:
                 write_topic_turn(db, snapshot["dialogue"], message_id, assistant.lastrowid, now)
             db.execute("UPDATE messages SET status='complete' WHERE id=?", (message_id,))

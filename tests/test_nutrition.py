@@ -63,10 +63,24 @@ def attach(service, client, route=None, queries=None, choices=None, plan=None):
     catalog.cart_link.return_value = LINK
 
     def structured(messages, schema, purpose="memory_extraction"):
+        if purpose == "nutrition_plan_fields":
+            routed = route or ROUTE
+            fields = {
+                key: routed[key] for key in ("period", "food_format", "cheaper", "budget_rub")
+            }
+            return json.dumps(
+                dict(
+                    fields,
+                    continues_menu=routed["action"] != "none",
+                    goal_change_quote="Измени план цели" if routed["goal_related"] else "",
+                )
+            )
         value = {
             "nutrition_route": route if route is not None else ROUTE,
             "nutrition_queries": {"queries": queries if queries is not None else ["гречка"]},
             "nutrition_selection": {"items": choices if choices is not None else [CHOICE]},
+            "nutrition_targets": {"days": None, "limits": []},
+            "nutrition_goal_check": {"status": "fit", "description": "Рацион подходит."},
             "goal_planning": plan or CONTINUE,
         }.get(purpose, json.loads(EMPTY_TURN))
         return json.dumps(value, ensure_ascii=False)

@@ -2,6 +2,7 @@
 
 import json
 
+from fitagent.domain import profile_for_model
 from fitagent.memory_layers import inventory_facts
 from fitagent.memory_schema import SAFETY_CATEGORIES, version_covers
 from fitagent.safety_schema import SAFETY_ERROR, SAFETY_PROMPT, SafetyValidationError, parse_safety
@@ -64,7 +65,7 @@ class SafetyGuard:
         payload = {
             "stage": stage,
             "question": question,
-            "profile": profile,
+            "profile": profile_for_model(profile),
             "goal": goal
             if goal is not None
             else (

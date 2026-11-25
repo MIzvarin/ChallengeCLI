@@ -58,7 +58,7 @@ def collect_usage(events, include_history=False):
         incomplete = None in counts.values()
         if incomplete:
             report["incomplete_requests"] += 1
-        if request.get("purpose") == "answer":
+        if request.get("purpose") in ("answer", "nutrition_plan"):
             report["last_answer"] = counts
         if include_history:
             report["history"].append(

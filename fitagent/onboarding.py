@@ -2,7 +2,13 @@
 
 import json
 
-from fitagent.domain import bmi_warning, profile_number, validate_birth_date, validate_profile
+from fitagent.domain import (
+    bmi_warning,
+    canonical_sex,
+    profile_number,
+    validate_birth_date,
+    validate_profile,
+)
 from fitagent.goal_state import initial_state
 from fitagent.memory import project
 
@@ -13,7 +19,7 @@ QUESTIONS = (
     ),
     ("height", "Какой у вас рост в сантиметрах? Например: 180."),
     ("weight", "Какой у вас текущий вес в килограммах? Например: 80.5."),
-    ("sex", "Укажите пол для оценки параметров питания и тренировок."),
+    ("sex", "Выберите пол для оценки параметров питания и тренировок."),
     ("goal", "Какова ваша цель? Опишите желаемый результат и срок, если он есть."),
     ("target", "Какой целевой вес в килограммах? Если он не задан, напишите «нет»."),
     (
@@ -81,10 +87,14 @@ class ChatOnboarding:
                 (json.dumps(state, ensure_ascii=False),),
             )
 
+    @staticmethod
+    def next_field(state):
+        return next((name for name, _ in QUESTIONS if name not in state["answers"]), None)
+
     def prompt(self, state):
-        for name, question in QUESTIONS:
-            if name not in state["answers"]:
-                return question
+        field = self.next_field(state)
+        if field is not None:
+            return dict(QUESTIONS)[field]
         return "Ответы собраны. Напишите «сохранить», чтобы повторить проверку. Для исправления: «цель: ...», «аллергии: ...», «лекарства: ...» или название другого поля и новый ответ."
 
     def start(self):
@@ -118,8 +128,11 @@ class ChatOnboarding:
             if not low <= value <= high:
                 raise ValueError(f"{label}: допустимый диапазон от {low} до {high}.")
             return value
-        if name == "sex" and len(text) > 100:
-            raise ValueError("Пол: введите до 100 символов.")
+        if name == "sex":
+            sex = canonical_sex(text)
+            if sex is None:
+                raise ValueError("Выберите «Мужской» или «Женский» в списке.")
+            return sex
         if name in FACT_FIELDS and text.casefold().strip(" .!?") in {"да", "не знаю", "пропустить"}:
             raise ValueError(
                 "Сразу опишите подробности или напишите «нет». Для препаратов достаточно названия; неизвестную дозу не придумывайте."
@@ -179,7 +192,7 @@ class ChatOnboarding:
             state.pop("warning", None)
             state.pop("warning_shown", None)
         else:
-            name = next((key for key, _ in QUESTIONS if key not in answers), None)
+            name = self.next_field(state)
         if name is not None:
             value = self.validate_answer(name, text)
             source = self.store.message("user", original, self.service.clock(), "onboarding")

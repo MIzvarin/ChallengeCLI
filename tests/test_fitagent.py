@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import httpx
 from support import EMPTY_TURN, allow_goal_continue, safe_response, seed_accepted_goal
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Input, RichLog, Select, Static
 
 from fitagent.domain import SYSTEM_PROMPT, bmi_warning, token_bound, validate_profile
 from fitagent.loader import ResponseLoader
@@ -581,6 +581,29 @@ def test_tui_commands():
 
 def test_tui_goal_confirmation():
     asyncio.run(tui_flow())
+
+
+def test_tui_sex_dropdown_resumes_onboarding_and_saves_canonical_value():
+    async def flow():
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, service = fixture(directory)
+            for value in ("1996-01-01", "180", "74"):
+                service.chat(value)
+            app = FitAgentApp(service)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                selector = app.query_one("#profile-sex", Select)
+                assert selector.display and selector.value is Select.BLANK
+                selector.focus()
+                await pilot.press("enter")
+                assert selector.expanded
+                await pilot.press("end", "enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert service.onboarding.state()["answers"]["sex"] == "женский"
+                assert not selector.display
+
+    asyncio.run(flow())
 
 
 def load_tests(loader, tests, pattern):

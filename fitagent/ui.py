@@ -7,15 +7,17 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.widgets import Footer, Input, RichLog, Static
+from textual.widgets import Footer, Input, RichLog, Select, Static
 
 from fitagent.chat import write_message, write_topic_notice
+from fitagent.domain import PROFILE_SEX_OPTIONS
 from fitagent.goal_state import LABELS
 from fitagent.loader import ResponseLoader
 from fitagent.logs import LogsPanel
+from fitagent.plan_mcp import request_plan
 from fitagent.token_chart import TokensScreen
 
-COMMAND_HINT = "/profile  /progress  /memory  /logs  /tokens  /clear  /help  /exit"
+COMMAND_HINT = "/plan  /profile  /progress  /memory  /logs  /tokens  /clear  /help  /exit"
 
 
 class FitAgentApp(App):
@@ -95,6 +97,13 @@ class FitAgentApp(App):
                 id="status",
                 markup=False,
             )
+            selector = Select(
+                [(value.capitalize(), value) for value in PROFILE_SEX_OPTIONS],
+                prompt="Выберите пол",
+                id="profile-sex",
+            )
+            selector.display = False
+            yield selector
             yield Input(placeholder="Напишите сообщение…", id="question")
         yield Footer()
 
@@ -102,6 +111,7 @@ class FitAgentApp(App):
         try:
             self.service.start_chat()
             self.refresh_profile()
+            self.refresh_sex_selection()
         except Exception:
             self.query_one("#chat", RichLog).write(
                 "Не удалось подготовить профиль и опрос. Перезапустите приложение и проверьте доступ к папке данных."
@@ -149,10 +159,21 @@ class FitAgentApp(App):
                 text += "\n" + LABELS[state["stage"]]
         self.query_one("#profile-bar", Static).update(text)
 
+    def refresh_sex_selection(self):
+        selector = self.query_one("#profile-sex", Select)
+        state = self.service.onboarding.state()
+        selector.display = bool(state and self.service.onboarding.next_field(state) == "sex")
+        selector.value = Select.BLANK
+
+    def on_select_changed(self, event: Select.Changed):
+        if event.select.id == "profile-sex" and event.select.display and not self.busy:
+            if event.value in PROFILE_SEX_OPTIONS:
+                self.ask(event.value)
+
     def check_reminder(self):
         if not self.busy and self.service.current_profile() and self.service.due():
             self.query_one("#chat", RichLog).write(
-                "Проверьте актуальность веса, режима и цели. Сообщите изменения в чате; /profile — просмотр."
+                "Если режим или цель изменились, сообщите об этом в чате. /profile — просмотр."
             )
             self.service.defer()
 
@@ -192,6 +213,7 @@ class FitAgentApp(App):
         self.refresh_profile()
         self.query_one("#logs-panel", LogsPanel).refresh_logs()
         prompt = self.service.start_chat()
+        self.refresh_sex_selection()
         if prompt:
             write_message(log, "assistant", prompt)
 
@@ -247,6 +269,7 @@ class FitAgentApp(App):
                 log.write(f"Изменение: {rows[-1]['weight'] - rows[0]['weight']:+.1f} кг")
         elif text == "/help":
             self.query_one("#chat", RichLog).write(
+                "/plan [условия] — составить программу питания через MCP FitAgent.\n"
                 "/profile — профиль только для чтения; изменения сообщайте в чате. /progress — вес.\n"
                 "/memory — факты; /memory edit НОМЕР текст — исправить; "
                 "/memory delete НОМЕР — удалить обычный факт. Эти команды не обращаются к API.\n"
@@ -274,6 +297,8 @@ class FitAgentApp(App):
                 "Профиль и переписка передаются API Go. Для памяти и отдельной проверки безопасности используется Luna; "
                 "провайдер может хранить запросы до 30 дней. Ответы не заменяют врача."
             )
+        elif text == "/plan" or text.startswith("/plan "):
+            self.ask(text)
         elif text.startswith(("/confirm", "/cancel")):
             self.ask(text)
         elif text.startswith("/"):
@@ -285,7 +310,9 @@ class FitAgentApp(App):
     async def ask(self, text):
         self.busy = True
         field = self.query_one("#question", Input)
+        selector = self.query_one("#profile-sex", Select)
         field.disabled = True
+        selector.disabled = True
         log = self.query_one("#chat", RichLog)
         write_message(log, "user", text, date.today().isoformat())
         status = self.query_one("#status", Static)
@@ -294,7 +321,10 @@ class FitAgentApp(App):
         loader.start()
         try:
             normal_turn = bool(self.service.current_profile()) and not text.startswith("/")
-            answer = await asyncio.to_thread(self.service.chat, text)
+            if text == "/plan" or text.startswith("/plan "):
+                answer = await request_plan(self.service.store.directory, text[5:].strip())
+            else:
+                answer = await asyncio.to_thread(self.service.chat, text)
             try:
                 notice = self.service.topics.repository.notice() if normal_turn else None
             except Exception:
@@ -306,6 +336,7 @@ class FitAgentApp(App):
                 write_topic_notice(log, notice["action"], notice["title"])
             write_message(log, "assistant", answer)
             self.refresh_profile()
+            self.refresh_sex_selection()
         except Exception as exc:
             # No traceback/request payload in UI or logs; audit only exception type.
             self.service.audit("ui_error", {"type": type(exc).__name__})
@@ -321,4 +352,6 @@ class FitAgentApp(App):
             status.update(COMMAND_HINT)
             self.busy = False
             field.disabled = False
+            selector.value = Select.BLANK
+            selector.disabled = False
             field.focus()

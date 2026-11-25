@@ -21,6 +21,7 @@ ACTIVITY_KINDS = (
     "mcp_finished",
     "mcp_failed",
     "mcp_search_retry",
+    "nutrition_selection_failed",
     "nutrition_cart_skipped",
 )
 MCP_OPERATIONS = {"search": "поиск товаров", "cart_link": "создание ссылки на корзину"}
@@ -40,8 +41,18 @@ CART_SKIP_REASONS = {
     "quantity_error": "не удалось рассчитать количества упаковок",
     "product_conflict": "карточки или единицы одного товара не совпадают",
     "budget": "закупка превышает указанный бюджет",
+    "goal_mismatch": "рацион не подходит для активной цели",
+    "goal_data_missing": "нужны сведения для подбора рациона под цель",
     "mcp_error": "не удалось получить товары из MCP",
     "link_error": "не удалось получить ссылку на корзину",
+}
+SELECTION_FAILURE_REASONS = {
+    "provider_response": "Luna не вернула результат подбора",
+    "invalid_json": "ответ подбора не удалось прочитать",
+    "invalid_schema": "структура ответа подбора не прошла проверку",
+    "duplicate_group": "в ответе повторилась группа товаров",
+    "unknown_group": "в ответе указана отсутствующая группа товаров",
+    "unknown_product": "выбранного товара нет в указанной группе",
 }
 SAFETY_STAGES = {
     "onboarding": "первичное заполнение профиля",
@@ -69,6 +80,15 @@ def activity_message(kind, details):
         return None
     if kind in {"mcp_started", "mcp_finished", "mcp_failed"}:
         code = details.get("operation")
+        if code == "create_nutrition_plan":
+            prefix = "MCP FitAgent  create_nutrition_plan"
+            if kind == "mcp_started":
+                return prefix + " · начато"
+            duration = details.get("duration_ms")
+            if integer(duration):
+                status = "завершено" if kind == "mcp_finished" else "ошибка"
+                return f"{prefix} · {status} · {duration} мс"
+            return None
         operation = MCP_OPERATIONS.get(code) if isinstance(code, str) else None
         if not operation:
             return None
@@ -85,6 +105,10 @@ def activity_message(kind, details):
         code = details.get("reason")
         reason = CART_SKIP_REASONS.get(code) if isinstance(code, str) else None
         return f"Корзина ВкусВилла не собрана  {reason}" if reason else None
+    if kind == "nutrition_selection_failed":
+        code = details.get("reason")
+        reason = SELECTION_FAILURE_REASONS.get(code) if isinstance(code, str) else None
+        return f"Подбор товаров  {reason}" if reason else None
     if kind == "fact_changed":
         action = {
             "added": "Факт добавлен",

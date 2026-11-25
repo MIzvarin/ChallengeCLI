@@ -235,7 +235,10 @@ def test_freshness_uses_existing_category_deadlines_without_expiring_allergy():
         assert any("лекарства" in item for item in due)
         assert any("тренировок" in item for item in due)
         assert not any("арахис" in item for item in due)
+        assert not any(item.startswith("Сообщите текущий вес") for item in due)
         assert not any("Нет сведений: Пищевые ограничения" in item for item in due)
+        missing_weight = required_information(memory, {"weight": None}, NOW)
+        assert "Сообщите текущий вес в килограммах" in missing_weight
 
 
 def test_changed_data_invalidates_previous_consent_and_only_returns_to_validation():

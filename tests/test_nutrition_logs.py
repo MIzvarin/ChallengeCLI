@@ -114,6 +114,7 @@ def test_mcp_log_metadata_is_allowlisted_and_never_renders_arbitrary_text():
         ("mcp_finished", {"operation": "search", "count": 101}),
         ("nutrition_cart_skipped", {"reason": "PRIVATE"}),
         ("nutrition_cart_skipped", {"reason": ["PRIVATE"]}),
+        ("nutrition_selection_failed", {"reason": "PRIVATE"}),
     ):
         assert (
             format_activity(
@@ -125,6 +126,7 @@ def test_mcp_log_metadata_is_allowlisted_and_never_renders_arbitrary_text():
         ("mcp_search_retry", {"attempt": 2, "reason": "timeout"}),
         ("mcp_failed", {"operation": "search"}),
         ("nutrition_cart_skipped", {"reason": "mcp_error"}),
+        ("nutrition_selection_failed", {"reason": "invalid_schema"}),
     ):
         rendered = format_activity(
             {

@@ -84,6 +84,15 @@ class Storage:
                 weight = current_weight(db)
                 if weight:
                     result.update(weight)
+                elif (
+                    isinstance(result["weight"], (int, float))
+                    and 25 <= result["weight"] <= 400
+                    and not db.execute(
+                        "SELECT 1 FROM sticky_facts WHERE category='measurements' "
+                        "AND fact_key LIKE 'weight_%' LIMIT 1"
+                    ).fetchone()
+                ):
+                    result.update(measured_at=None, weight_recorded_at=result["confirmed_at"])
                 else:
                     result.update(weight=None, measured_at=None)
         return result

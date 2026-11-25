@@ -2,9 +2,8 @@
 
 import hashlib
 import json
-from datetime import timedelta
 
-from fitagent.domain import bmi_warning
+from fitagent.domain import bmi_warning, profile_for_model
 from fitagent.goal_planner import GoalPlanner
 from fitagent.goal_state import (
     DONE,
@@ -73,9 +72,8 @@ def required_information(snapshot, profile, now):
             and parse_stamp(fact["review_at"]) <= now
         ):
             required.append("Уточнить актуальность: " + fact["value"]["text"])
-    measured_at = profile.get("measured_at")
-    if not measured_at or parse_stamp(measured_at) + timedelta(days=7) <= now:
-        required.append("Сообщите текущий вес в килограммах и дату измерения")
+    if profile.get("weight") is None:
+        required.append("Сообщите текущий вес в килограммах")
     required.extend(
         issue["question"] for issue in snapshot["issues"] if issue["applicability"] == "global"
     )
@@ -321,7 +319,7 @@ class GoalWorkflow:
             {
                 "state": state,
                 "goal": goal,
-                "profile": profile,
+                "profile": profile_for_model(profile),
                 "memory": json.loads(
                     self.service.memory.context(
                         memory,
