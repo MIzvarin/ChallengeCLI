@@ -17,8 +17,10 @@ def write_topic_notice(chat, action, title):
         chat.write(Text(f"↳ {label}: {title}", style="#929292"))
 
 
-def basket_display(content):
+def basket_display(content, status="complete"):
     """Remove the advisory appendix from previously saved shopping outcomes."""
+    if status in {"daily_plan", "outdated_daily_plan", "basket_recall"}:
+        return content
     if not (
         "Корзина ВкусВилла: <https://vkusvill.ru/" in content
         or content.startswith(("Не удалось подобрать рацион,", "Для подбора рациона под вашу цель"))
@@ -36,7 +38,13 @@ def write_message(chat, role, content, created_at="", status="complete"):
     title = "FitAgent" if assistant else "Вы"
     if created_at:
         title += f" · {created_at[:10]}"
-    body = Markdown(basket_display(content)) if assistant else Text(content)
+    body = Markdown(basket_display(content, status)) if assistant else Text(content)
+    if status == "outdated_daily_plan":
+        body = Group(
+            Text("Этот план сохранён в истории. Используйте обновлённый план.", style="#929292"),
+            Text(""),
+            body,
+        )
     notice = {
         "failed": "Ответ не получен. При необходимости отправьте вопрос ещё раз.",
         "pending": "Запрос не завершён. При необходимости отправьте вопрос ещё раз.",

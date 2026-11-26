@@ -1,4 +1,4 @@
-"""Strict Luna contract for collecting goal details and proposing plan revisions."""
+"""Strict contract for collecting goal details and proposing plan revisions."""
 
 import json
 

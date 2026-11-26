@@ -1,14 +1,23 @@
 """Shared journal, measurement and chat-state persistence primitives."""
 
+import hashlib
 import json
 import math
 
-from fitagent.memory_schema import parse_stamp, reported_order
+from fitagent.memory_schema import SAFETY_CATEGORIES, parse_stamp, reported_order, version_covers
+
+DAILY_SAFETY_CATEGORIES = sorted(
+    SAFETY_CATEGORIES | {"medications", "supplements", "symptoms", "recovery"}
+)
 
 
 def initialize_state(db):
     db.executescript("""
         CREATE TABLE IF NOT EXISTS chat_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS daily_plans (
+            day TEXT PRIMARY KEY, attempt TEXT NOT NULL, expires_at REAL NOT NULL,
+            message_id INTEGER REFERENCES messages(id), input_key TEXT
+        );
         CREATE TABLE IF NOT EXISTS pending_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload TEXT NOT NULL,
             created_at TEXT NOT NULL, revision INTEGER NOT NULL, session TEXT NOT NULL
@@ -27,6 +36,7 @@ def initialize_state(db):
         ("profiles", "birth_date", "TEXT"),
         ("goals", "completed_at", "TEXT"),
         ("topics", "closed_at", "TEXT"),
+        ("daily_plans", "input_key", "TEXT"),
     ):
         if name not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
@@ -38,6 +48,49 @@ def initialize_state(db):
         "FROM sticky_facts f WHERE f.id=(SELECT MAX(v.id) FROM sticky_facts v WHERE v.lineage_id=f.lineage_id) "
         "AND NOT EXISTS(SELECT 1 FROM memory_journal j WHERE j.lineage_id=f.lineage_id)"
     )
+
+
+def daily_plan_input_key(db, now):
+    """Identify the current safety inputs and active execution plan within a transaction."""
+    from fitagent.goal_state import EXECUTION, plan_key, read_state
+
+    marks = ",".join("?" for _ in DAILY_SAFETY_CATEGORIES)
+    rules = [
+        (row["id"], row["category"], row["value"])
+        for row in db.execute(
+            "SELECT id,category,value,valid_from,valid_until,superseded_at FROM sticky_facts "
+            f"WHERE category IN ({marks}) AND "
+            "(status='active' OR (status='replaced' AND superseded_at IS NOT NULL)) ORDER BY id",
+            DAILY_SAFETY_CATEGORIES,
+        )
+        if version_covers(dict(row), now)
+    ]
+    profile_id = db.execute("SELECT MAX(id) FROM profiles").fetchone()[0]
+    weight = current_weight(db)
+    goal_id = db.execute("SELECT MAX(id) FROM goals WHERE completed_at IS NULL").fetchone()[0]
+    execution = None
+    if goal_id is not None:
+        state = read_state(db, goal_id)
+        if state["stage"] == EXECUTION:
+            execution = plan_key(state)
+            for row in db.execute(
+                "SELECT payload FROM pending_actions WHERE kind='goal' "
+                "AND revision=(SELECT CAST(value AS INTEGER) FROM settings WHERE key='memory_revision') "
+                "AND session=(SELECT value FROM settings WHERE key='session')"
+            ):
+                try:
+                    payload = json.loads(row["payload"])
+                except (ValueError, RecursionError):
+                    continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("goal_id") == goal_id
+                    and payload.get("plan_key") == execution
+                ):
+                    execution = "paused"
+                    break
+    inputs = (profile_id, weight["weight"] if weight else None, rules, goal_id, execution)
+    return hashlib.sha256(json.dumps(inputs, ensure_ascii=False).encode()).hexdigest()
 
 
 def bump_revision(db):

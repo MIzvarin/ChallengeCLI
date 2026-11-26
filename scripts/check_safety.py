@@ -1,4 +1,4 @@
-"""Validate a saved Luna safety response locally; never sends data to an API."""
+"""Validate a saved safety response locally; never sends data to an API."""
 
 import argparse
 import sys
@@ -18,7 +18,9 @@ class SafetyArgumentParser(argparse.ArgumentParser):
 
 
 def main():
-    parser = SafetyArgumentParser(description="Проверить структурированный ответ безопасности Luna")
+    parser = SafetyArgumentParser(
+        description="Проверить структурированный ответ проверки безопасности"
+    )
     parser.add_argument("file", help="Путь к JSON или - для стандартного ввода")
     parser.add_argument("--rule", action="append", default=[], help="Обязательный rule_id")
     args = parser.parse_args()

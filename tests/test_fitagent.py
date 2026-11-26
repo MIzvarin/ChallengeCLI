@@ -400,6 +400,7 @@ async def tui_flow():
                 "нет",
                 "нет",
                 "нет",
+                "07:30",
             ):
                 field.value = answer
                 await pilot.press("enter")

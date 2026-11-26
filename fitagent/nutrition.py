@@ -205,7 +205,16 @@ class NutritionShopping:
                 candidates.append({"query_index": index, "query": query, "candidates": products})
             searchable = [group for group in candidates if group["candidates"]]
             if not searchable:
-                return self.price_report([], [*queries, *unmapped], None, audit=catalog is None)
+                report = self.price_report([], [*queries, *unmapped], None, audit=catalog is None)
+                if "daily_plan" in payload:
+                    self.skip_cart("no_products")
+                    report["reason"] = "no_products"
+                    report["text"] = (
+                        "Поиск товаров во ВкусВилле не нашёл подходящих позиций.\n\n"
+                        + report["text"]
+                        + "\n\nДля другого подбора введите /plan на сегодня."
+                    )
+                return report
             failure = "selection_error"
             try:
                 chosen = self.structured(
@@ -272,7 +281,8 @@ class NutritionShopping:
                 response
                 + "\n\n"
                 + text
-                + "\n\nСсылка на корзину недоступна. Найденные цены приведены выше."
+                + "\n\nСсылка на корзину недоступна. Сбой на шаге создания ссылки во ВкусВилле. "
+                "Найденные цены приведены выше. Повторите запрос на подбор позже."
             )
         basket = "Корзина ВкусВилла: <" + link + ">\n\n" + text
         return response + "\n\n" + basket if keep_plan else basket

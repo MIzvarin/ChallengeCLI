@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from fitagent.nutrition import NutritionShopping
-from fitagent.provider import ModelClient
+from fitagent.provider import DEFAULT_MODEL, ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
 from fitagent.vkusvill import VkusvillClient
@@ -24,7 +24,7 @@ def build_service(store):
         os.environ.get(
             "FITAGENT_API_URL", "https://opencode.ai/inference/go/openai/v1/chat/completions"
         ),
-        os.environ.get("FITAGENT_MODEL", "deepseek-v4.1-flash"),
+        os.environ.get("FITAGENT_MODEL", DEFAULT_MODEL),
         store.session_id(),
         audit,
     )
@@ -76,6 +76,7 @@ def main(argv=None, *, from_chat=False):
             )
         return
 
+    from fitagent.plan_mcp import request_daily_plan
     from fitagent.ui import FitAgentApp
 
-    FitAgentApp(service).run()
+    FitAgentApp(service, daily_plan_request=request_daily_plan).run()

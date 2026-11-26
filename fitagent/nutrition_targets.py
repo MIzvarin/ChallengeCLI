@@ -66,12 +66,14 @@ ACTIVITY_RANGES = {
 }
 
 
-def read_targets(nutrition, payload):
+def read_targets(nutrition, payload, *, days=None):
     context = dict(payload)
     state = context.get("goal_state")
     if state and state.get("stage") != "execution":
         context["goal_state"] = None
     targets = nutrition.structured(TARGET_PROMPT, TARGET_SCHEMA, context, "nutrition_targets")
+    if days is not None:
+        targets["days"] = days
     seen = set()
     for limit in targets["limits"]:
         key = limit["metric"], limit["scope"]

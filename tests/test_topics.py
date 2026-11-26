@@ -18,9 +18,9 @@ from test_memory import (
     error,
     facts,
     fixture,
-    luna_reply,
     operation,
     real_client,
+    responses_reply,
 )
 from textual.widgets import Input, RichLog
 
@@ -79,7 +79,7 @@ def context_state(client):
     )
 
 
-def test_topic_choice_shares_the_single_strict_luna_extraction_request():
+def test_topic_choice_shares_the_single_strict_extraction_request():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         route(client, title="Меню")
@@ -677,15 +677,15 @@ def test_checkpoint_requests_are_included_in_durable_token_totals():
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
             transport.post.side_effect = [
-                luna_reply(first),
-                luna_reply(safety_json()),
+                responses_reply(first),
+                responses_reply(safety_json()),
                 flash,
-                luna_reply(safety_json()),
-                luna_reply(second),
+                responses_reply(safety_json()),
+                responses_reply(second),
                 flash,
-                luna_reply(safety_json()),
+                responses_reply(safety_json()),
                 flash,
-                luna_reply(safety_json()),
+                responses_reply(safety_json()),
             ]
             service.answer("Меню")
             service.answer("Тренировки")

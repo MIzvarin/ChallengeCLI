@@ -80,7 +80,7 @@ def test_draft_block_and_protocol_failure_never_show_or_commit_the_draft():
             assert not any(row["role"] == "assistant" for row in store.chat_messages())
 
 
-def test_luna_assigns_warning_for_unknown_details_and_main_only_receives_public_verdict():
+def test_safety_model_assigns_warning_for_unknown_details_and_chat_only_receives_public_verdict():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         extract(client, operation("Принимаю лекарство А", category="medications", key="medicine_a"))

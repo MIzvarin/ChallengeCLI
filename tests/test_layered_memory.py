@@ -28,6 +28,7 @@ ANSWERS = (
     "креатин, доза неизвестна",
     "лекарство А, дозу не помню",
     "силовые три раза в неделю",
+    "07:30",
 )
 
 
@@ -47,14 +48,17 @@ def test_first_start_is_resumable_stepwise_chat_and_saves_all_required_categorie
         reopened = FitnessService(Storage(directory), client, clock=lambda: NOW)
         assert reopened.start_chat() is None
         assert "рост" in store.chat_messages()[-1]["content"]
-        for answer in ANSWERS[1:-1]:
+        for answer in ANSWERS[1:-2]:
             reopened.chat(answer)
         client.generate.assert_not_called()
         client.generate_safety.assert_not_called()
         error(lambda: reopened.chat("да"), "Сразу опишите")
+        assert "встаёте" in reopened.chat(ANSWERS[-2])
+        error(lambda: reopened.chat("24:00"), "ЧЧ:ММ")
         response = reopened.chat(ANSWERS[-1])
         assert "сохранены" in response
         assert reopened.current_profile()["birth_date"] == ANSWERS[0]
+        assert store.wake_time() == "07:30"
         facts = reopened.memory.repository.load(NOW)["facts"]
         assert {f["category"] for f in facts} == {
             "measurements",
@@ -93,7 +97,8 @@ def test_onboarding_failure_rolls_back_final_profile_and_is_retryable():
         assert "PRIVATE" not in error(lambda: service.chat(ANSWERS[-1]))
         assert store.latest("profiles") is None
         assert not service.memory.repository.load(NOW)["facts"]
-        assert service.onboarding.state()["answers"]["training"] == ANSWERS[-1]
+        assert service.onboarding.state()["answers"]["training"] == ANSWERS[-2]
+        assert store.wake_time() is None
 
 
 def test_birth_date_is_validated_and_age_changes_without_overwriting_birth_date():
@@ -290,7 +295,7 @@ def test_onboarding_corrections_do_not_skip_questions_or_authorize_risky_plan():
             service.chat(answer)
         assert store.latest("profiles") is None
         response = service.chat("аллергии: нет")
-        assert "программа тренировок" in response
+        assert "встаёте" in response
         assert service.onboarding.state()["answers"]["allergies"] == "нет"
         assert store.latest("profiles") is None
         service.chat(answers[-1])

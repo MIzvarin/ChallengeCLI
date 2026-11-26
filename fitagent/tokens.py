@@ -21,24 +21,31 @@ def api_usage(data):
 
 
 def iter_usage(events):
-    """Pair serial API audit records, retaining requests without usage.
-
-    Application API calls are serial. Each api_usage belongs to the preceding
-    api_request with the same purpose; standalone usage is also supported.
-    """
-    pending = None
+    """Match concurrent calls by ID and retain serial pairing for older audit records."""
+    calls = []
+    pending = {}
+    legacy = None
     for kind, details in events:
+        request_id = details.get("request_id")
+        purpose = details.get("purpose")
         if kind == "api_request":
-            if pending is not None:
-                yield pending
-            pending = {"purpose": details.get("purpose")}
+            entry = {"purpose": purpose}
+            calls.append(entry)
+            if isinstance(request_id, str) and request_id:
+                pending[request_id] = entry
+            else:
+                legacy = entry
         elif kind == "api_usage":
-            if pending is not None and pending["purpose"] != details.get("purpose"):
-                yield pending
-            yield details
-            pending = None
-    if pending is not None:
-        yield pending
+            if isinstance(request_id, str) and request_id:
+                entry = pending.pop(request_id, None)
+            else:
+                entry = legacy if legacy is not None and legacy["purpose"] == purpose else None
+                legacy = None
+            if entry is None:
+                calls.append(details)
+            else:
+                entry.update(details)
+    yield from calls
 
 
 def collect_usage(events, include_history=False):

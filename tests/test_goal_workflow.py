@@ -1,4 +1,4 @@
-"""Goal pipeline integration tests with fake Luna only; never use the paid API."""
+"""Goal pipeline integration tests with a mocked model."""
 
 import copy
 import json
@@ -11,7 +11,7 @@ from unittest.mock import patch
 from support import EMPTY_TURN, safe_response
 from test_fitagent import NOW, fixture, profile
 from test_layered_memory import ANSWERS
-from test_memory import error, luna_reply, operation
+from test_memory import error, operation, responses_reply
 
 from fitagent.goal_planner import PLAN_ERROR, PLAN_PROMPT, PLAN_SCHEMA, GoalPlanner
 from fitagent.goal_state import (
@@ -26,7 +26,7 @@ from fitagent.goal_state import (
     transition,
 )
 from fitagent.goal_workflow import required_information
-from fitagent.provider import MEMORY_MODEL, MEMORY_URL, ModelClient
+from fitagent.provider import DEFAULT_MODEL, MEMORY_URL, ModelClient
 from fitagent.safety_schema import SAFETY_PROMPT
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
@@ -110,7 +110,7 @@ def test_onboarding_records_unvalidated_goal_without_executing_or_blocking_on_bm
         assert store.latest("goals")["risk_confirmed"]
 
 
-def test_allow_plan_needs_explicit_acceptance_and_confirmation_does_not_call_luna():
+def test_allow_plan_needs_explicit_acceptance_and_confirmation_does_not_call_model():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = prepared(directory)
         response = service.chat("продолжить")
@@ -410,18 +410,18 @@ def test_prompt_separates_critical_danger_from_bmi_and_requests_corrections():
     assert "Известную аллергию не надо заново подтверждать" in PLAN_PROMPT
 
 
-def test_luna_planner_uses_strict_responses_schema_and_never_main_chat_model():
+def test_goal_planner_uses_flash_and_strict_responses_schema_with_chat_override():
     client = ModelClient(
         "TEST_KEY", "https://example.test/chat", "flash", "test-session", lambda *args: None
     )
     payload = {"state": {"stage": PLANNING}, "required_information": []}
     with patch("fitagent.provider.httpx.Client") as factory:
         transport = factory.return_value.__enter__.return_value
-        transport.post.return_value = luna_reply(json.dumps(PLAN))
+        transport.post.return_value = responses_reply(json.dumps(PLAN))
         assert GoalPlanner(client).propose(payload) == PLAN
         sent = transport.post.call_args.kwargs["json"]
         assert transport.post.call_args.args[0] == MEMORY_URL
-        assert sent["model"] == MEMORY_MODEL
+        assert sent["model"] == DEFAULT_MODEL == "deepseek-v4.1-flash"
         assert sent["text"]["format"]["strict"] is True
         assert sent["text"]["format"]["schema"] == PLAN_SCHEMA
         assert transport.post.call_count == 1

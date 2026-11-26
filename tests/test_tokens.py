@@ -4,13 +4,15 @@ import asyncio
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Event
 from unittest.mock import patch
 
 import httpx
 from rich.text import Text
 from support import EMPTY_TURN, safe_response, seed_accepted_goal
-from test_memory import luna_reply
+from test_memory import responses_reply
 from textual.widgets import Input, RichLog, Static
 
 from fitagent.domain import validate_profile
@@ -88,6 +90,40 @@ def test_totals_cover_all_purposes_restart_and_more_than_visible_logs():
         assert empty["requests"] == 0
         assert empty["total_tokens"] == 0
         assert empty["last_answer"] is None
+
+
+def test_overlapping_calls_of_same_purpose_are_paired_even_when_completed_out_of_order():
+    with tempfile.TemporaryDirectory() as directory:
+        store, client, _ = fixture(directory)
+        started, release = Event(), Event()
+
+        def post(url, *, headers, json):
+            if json["messages"][0]["content"] == "Первый":
+                started.set()
+                assert release.wait(5)
+                return reply(100, 10)
+            return reply(200, 20)
+
+        with patch("fitagent.provider.httpx.Client") as factory:
+            factory.return_value.__enter__.return_value.post.side_effect = post
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(
+                    client.generate, [{"role": "user", "content": "Первый"}], None, "answer"
+                )
+                try:
+                    assert started.wait(5)
+                    client.generate([{"role": "user", "content": "Второй"}], None, "answer")
+                    partial = store.token_usage()
+                    assert partial["requests"] == 2 and partial["incomplete_requests"] == 1
+                finally:
+                    release.set()
+                first.result(timeout=5)
+
+        report = Storage(directory).token_usage(include_history=True)
+        assert report["requests"] == 2 and report["incomplete_requests"] == 0
+        assert report["total_tokens"] == 330
+        assert [entry["total_tokens"] for entry in report["history"]] == [110, 330]
+        assert report["last_answer"] == {"input_tokens": 200, "output_tokens": 20}
 
 
 def test_missing_partial_failed_and_pending_statistics_are_not_zero():
@@ -186,15 +222,17 @@ async def panel_flow():
                     return reply()
                 properties = payload["text"]["format"]["schema"]["properties"]
                 if "operations" in properties:
-                    return luna_reply(EMPTY_TURN, usage={"input_tokens": 10, "output_tokens": 2})
+                    return responses_reply(
+                        EMPTY_TURN, usage={"input_tokens": 10, "output_tokens": 2}
+                    )
                 if "action" in properties:
-                    return luna_reply(
+                    return responses_reply(
                         json.dumps(
                             {"action": "continue", "question": "", "plan": "", "criterion": ""}
                         )
                     )
                 messages = payload["input"]
-                return luna_reply(
+                return responses_reply(
                     safe_response(messages, json.loads(messages[-1]["content"])["stage"])
                 )
 

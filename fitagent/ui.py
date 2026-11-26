@@ -11,10 +11,13 @@ from textual.containers import Vertical
 from textual.widgets import Footer, Input, RichLog, Select, Static
 
 from fitagent.chat import basket_display, write_message, write_topic_notice
+from fitagent.daily_plan import ERROR as DAILY_PLAN_ERROR
+from fitagent.daily_plan import PENDING as DAILY_PLAN_PENDING
 from fitagent.domain import PROFILE_SEX_OPTIONS
 from fitagent.goal_state import LABELS
 from fitagent.loader import ResponseLoader
 from fitagent.logs import LogsPanel
+from fitagent.onboarding import validate_wake_time
 from fitagent.plan_mcp import request_plan
 from fitagent.token_chart import TokensScreen
 
@@ -81,11 +84,12 @@ class FitAgentApp(App):
         scrollbar-background-hover: #191919; scrollbar-background-active: #191919; }
     """
 
-    def __init__(self, service):
+    def __init__(self, service, *, daily_plan_request=None):
         super().__init__()
         self.service = service
         self.busy = False
         self.last_basket_id = 0
+        self.daily_plan_request = daily_plan_request
 
     def compose(self) -> ComposeResult:
         with Vertical(id="workspace"):
@@ -122,11 +126,42 @@ class FitAgentApp(App):
         self.set_interval(2, self.sync_baskets)
         self.set_interval(60, self.check_reminder)
         self.query_one("#question", Input).focus()
+        self.show_daily_plan()
+
+    @work(group="daily_plan", exclusive=True)
+    async def show_daily_plan(self):
+        if self.daily_plan_request is None:
+            return
+        chat = self.screen_stack[0].query_one("#chat", RichLog)
+        error = None
+        try:
+            if not self.service.current_profile():
+                return
+            day = self.service.clock().date().isoformat()
+            while (now := self.service.clock()).date().isoformat() == day:
+                state = self.service.store.daily_plan_status(now)
+                if state == "saved":
+                    break
+                if state == "missing":
+                    try:
+                        await self.daily_plan_request(self.service.store.directory)
+                    except ValueError as exc:
+                        if str(exc) != DAILY_PLAN_PENDING:
+                            error = str(exc)
+                            break
+                    else:
+                        break
+                await asyncio.sleep(2)
+        except Exception:
+            error = DAILY_PLAN_ERROR
+        if error:
+            write_message(chat, "assistant", error)
+        self.sync_baskets()
 
     def restore_chat(self):
         chat = self.query_one("#chat", RichLog)
         try:
-            messages = self.service.store.chat_messages()
+            messages = self.service.store.chat_messages(now=self.service.clock())
         except Exception:
             chat.write(
                 "Не удалось загрузить переписку. Перезапустите приложение; "
@@ -151,15 +186,22 @@ class FitAgentApp(App):
         if (self.busy and local_answer is None) or len(self.screen_stack) != 1:
             return
         try:
-            baskets = self.service.store.saved_baskets(self.last_basket_id)
-        except (OSError, sqlite3.Error):
+            baskets = self.service.store.saved_baskets(
+                self.last_basket_id, include_daily=True, now=self.service.clock()
+            )
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
             return
         for basket in baskets:
             if (
                 basket["content"] != local_answer
-                and basket_display(basket["content"]) != local_answer
+                and basket_display(basket["content"], basket["status"]) != local_answer
             ):
-                write_message(self.query_one("#chat", RichLog), "assistant", basket["content"])
+                write_message(
+                    self.query_one("#chat", RichLog),
+                    "assistant",
+                    basket["content"],
+                    status=basket["status"],
+                )
             self.last_basket_id = basket["id"]
 
     def refresh_profile(self, saved=None):
@@ -225,6 +267,7 @@ class FitAgentApp(App):
                 "Не удалось очистить данные. Повторите попытку; проверьте доступ к папке данных."
             )
             return
+        self.workers.cancel_group(self, "daily_plan")
         self.last_basket_id = 0
         log.clear()
         log.write("Данные очищены. Начата новая сессия.")
@@ -255,6 +298,23 @@ class FitAgentApp(App):
             )
         log.scroll_end(animate=False, force=True)
 
+    def wake_command(self, text):
+        try:
+            if not self.service.current_profile():
+                raise ValueError("Укажите время подъёма в ходе опроса в чате.")
+            wake_time = validate_wake_time(text)
+            self.service.store.set_wake_time(wake_time)
+            response = (
+                f"Время подъёма — {wake_time}. Учту его в следующем плане дня."
+                if wake_time
+                else "Сохранено, что время подъёма меняется. Учту это в следующем плане дня."
+            )
+        except ValueError as exc:
+            response = str(exc)
+        except Exception:
+            response = "Не удалось сохранить время подъёма. Проверьте доступ к папке данных."
+        write_message(self.query_one("#chat", RichLog), "assistant", response)
+
     def on_input_submitted(self, event):
         if event.input.id != "question" or self.busy:
             return
@@ -272,6 +332,8 @@ class FitAgentApp(App):
             self.action_clear()
         elif text == "/profile":
             self.action_profile()
+        elif text == "/wake" or text.startswith("/wake "):
+            self.wake_command(text[5:].strip())
         elif text == "/memory" or text.startswith("/memory "):
             self.memory_command(text)
         elif text == "/progress":
@@ -292,6 +354,7 @@ class FitAgentApp(App):
             self.query_one("#chat", RichLog).write(
                 "/plan [условия] — составить программу питания через MCP FitAgent.\n"
                 "/plan последняя корзина — показать сохранённую корзину.\n"
+                "/wake ЧЧ:ММ или /wake нет — изменить время подъёма для будущих планов дня.\n"
                 "/profile — профиль только для чтения; изменения сообщайте в чате. /progress — вес.\n"
                 "/memory — факты; /memory edit НОМЕР текст — исправить; "
                 "/memory delete НОМЕР — удалить обычный факт. Эти команды не обращаются к API.\n"
@@ -309,15 +372,16 @@ class FitAgentApp(App):
                 "предупреждения и блокировки безопасности, ошибки проверки безопасности и памяти. "
                 "Успешные проверки скрыты; тексты диалога и личные данные в ленту не попадают. "
                 "Контекст и ответ — по статистике API после получения ответа; "
-                "общий расход включает оценку цели, сводки и извлечение фактов Luna.\n"
+                "общий расход включает оценку цели, сводки и извлечение фактов.\n"
                 "Номер факта постоянный. /memory history НОМЕР — его журнал. В /logs — «Факт №НОМЕР обновлён» или «Актуальность факта подтверждена». Без личных значений.\n"
                 "Темы переключаются автоматически; при возврате используется checkpoint. "
                 "Ручных команд переключения нет.\n"
                 "/clear — без подтверждения удаляет профиль, цели, переписку, память, сводки и логи, "
                 "начинает новую сессию. API-ключ остаётся.\n"
                 "После отказа обновлять профиль напомним через сутки. "
-                "Профиль и переписка передаются API Go. Для памяти и отдельной проверки безопасности используется Luna; "
-                "провайдер может хранить запросы до 30 дней. Ответы не заменяют врача."
+                "Профиль и переписка передаются API Go. Для памяти и отдельной проверки безопасности "
+                "используется DeepSeek Flash. Условия обработки данных: opencode.ai/docs/go/#privacy. "
+                "Ответы не заменяют врача."
             )
         elif text == "/plan" or text.startswith("/plan "):
             self.ask(text)
@@ -342,7 +406,8 @@ class FitAgentApp(App):
         loader = self.query_one("#response-loader", ResponseLoader)
         loader.start()
         try:
-            normal_turn = bool(self.service.current_profile()) and not text.startswith("/")
+            had_profile = bool(self.service.current_profile())
+            normal_turn = had_profile and not text.startswith("/")
             if text == "/plan" or text.startswith("/plan "):
                 answer = await request_plan(self.service.store.directory, text[5:].strip())
             else:
@@ -357,9 +422,16 @@ class FitAgentApp(App):
             if notice:
                 write_topic_notice(log, notice["action"], notice["title"])
             self.sync_baskets(local_answer=answer)
-            write_message(log, "assistant", answer)
+            recall = text[5:].strip().casefold() == "последняя корзина" and text.startswith(
+                "/plan "
+            )
+            write_message(
+                log, "assistant", answer, status="basket_recall" if recall else "complete"
+            )
             self.refresh_profile()
             self.refresh_sex_selection()
+            if not had_profile and self.service.current_profile():
+                self.show_daily_plan()
         except Exception as exc:
             # No traceback/request payload in UI or logs; audit only exception type.
             self.service.audit("ui_error", {"type": type(exc).__name__})

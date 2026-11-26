@@ -335,7 +335,7 @@ class FactMemory:
                 "и повторите вопрос. Ничего не удалено автоматически."
             )
 
-    def prepare(self, message_id, question, topics=None):
+    def prepare(self, message_id, question, topics=None, *, daily_plan=""):
         snapshot = self.repository.load(self.clock())
         topics = topics or TopicRouter(self.store, self.clock)
         topic_snapshot = topics.repository.snapshot()
@@ -354,6 +354,7 @@ class FactMemory:
                 "clarifications": snapshot["issues"],
                 "previous_exchange": self.repository.previous_exchange(message_id),
                 "dialogue": topics.catalog(topic_snapshot),
+                **({"daily_plan_reference": daily_plan} if daily_plan else {}),
             },
             ensure_ascii=False,
         )

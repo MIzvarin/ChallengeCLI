@@ -47,7 +47,7 @@ CART_SKIP_REASONS = {
     "link_error": "не удалось получить ссылку на корзину",
 }
 SELECTION_FAILURE_REASONS = {
-    "provider_response": "Luna не вернула результат подбора",
+    "provider_response": "Модель не вернула результат подбора",
     "invalid_json": "ответ подбора не удалось прочитать",
     "invalid_schema": "структура ответа подбора не прошла проверку",
     "duplicate_group": "в ответе повторилась группа товаров",
@@ -80,8 +80,8 @@ def activity_message(kind, details):
         return None
     if kind in {"mcp_started", "mcp_finished", "mcp_failed"}:
         code = details.get("operation")
-        if code == "create_nutrition_plan":
-            prefix = "MCP FitAgent  create_nutrition_plan"
+        if code in ("create_nutrition_plan", "create_daily_plan"):
+            prefix = f"MCP FitAgent  {code}"
             if kind == "mcp_started":
                 return prefix + " · начато"
             duration = details.get("duration_ms")

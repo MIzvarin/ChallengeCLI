@@ -1,6 +1,7 @@
-"""Direct Go transports: Flash chat completions and strict Luna Responses."""
+"""Direct OpenCode Go transports for chat and strict structured responses."""
 
 import json
+from uuid import uuid4
 
 import httpx
 
@@ -8,7 +9,7 @@ from fitagent.safety_schema import SafetyValidationError
 from fitagent.tokens import api_usage
 
 MEMORY_URL = "https://opencode.ai/inference/go/openai/v1/responses"
-MEMORY_MODEL = "gpt-6-luna"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 MEMORY_OUTPUT_LIMIT = 8192
 
 
@@ -39,7 +40,7 @@ class ModelClient:
         """No fallback to JSON mode/plain text and no automatic paid retries."""
         output_limit = None if purpose == "nutrition_selection" else MEMORY_OUTPUT_LIMIT
         payload = {
-            "model": MEMORY_MODEL,
+            "model": DEFAULT_MODEL,
             "input": messages,
             "stream": False,
             "store": False,
@@ -55,7 +56,7 @@ class ModelClient:
         }
         if output_limit is not None:
             payload["max_output_tokens"] = output_limit
-        data = self._post(MEMORY_URL, payload, purpose, MEMORY_MODEL, output_limit)
+        data = self._post(MEMORY_URL, payload, purpose, DEFAULT_MODEL, output_limit)
         failure_reason = "response_protocol"
         try:
             if data["status"] != "completed":
@@ -89,7 +90,7 @@ class ModelClient:
             if purpose.startswith("safety_"):
                 raise SafetyValidationError(failure_reason) from None
             raise ValueError(
-                "Luna не вернула полный структурированный ответ. Память не обновлена; повторите вопрос."
+                "Модель не вернула полный структурированный ответ. Память не обновлена; повторите вопрос."
             ) from None
 
     def generate_safety(self, messages, stage):
@@ -104,9 +105,8 @@ class ModelClient:
             if purpose.startswith("safety_"):
                 raise SafetyValidationError("missing_api_key")
             raise ValueError("Заполните OPENCODE_API_KEY в .env и перезапустите fitagent.")
-        self.audit(
-            "api_request", {"purpose": purpose, "model": model, "output_limit": output_limit}
-        )
+        request = {"purpose": purpose, "request_id": str(uuid4())}
+        self.audit("api_request", {**request, "model": model, "output_limit": output_limit})
         try:
             with httpx.Client(timeout=httpx.Timeout(180, connect=15)) as client:
                 response = client.post(
@@ -119,19 +119,19 @@ class ModelClient:
                     json=payload,
                 )
             if response.status_code != 200:
-                self.audit("api_error", {"purpose": purpose, "status": response.status_code})
+                self.audit("api_error", {**request, "status": response.status_code})
                 if purpose.startswith("safety_"):
                     raise SafetyValidationError("http_error", http_status=response.status_code)
                 raise ValueError(
                     f"API вернул HTTP {response.status_code}. Проверьте ключ и лимиты."
                 )
             data = response.json()
-            self.audit("api_usage", {"purpose": purpose, **api_usage(data)})
+            self.audit("api_usage", {**request, **api_usage(data)})
             if not isinstance(data, dict):
                 raise TypeError
             return data
         except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            self.audit("api_error", {"purpose": purpose, "type": type(exc).__name__})
+            self.audit("api_error", {**request, "type": type(exc).__name__})
             if purpose.startswith("safety_"):
                 reason = "response_protocol"
                 if isinstance(exc, httpx.TimeoutException):

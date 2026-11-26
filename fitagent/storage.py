@@ -11,6 +11,7 @@ from fitagent.activity import ACTIVITY_KINDS, format_activity
 from fitagent.fact_storage import initialize_memory
 from fitagent.state_storage import (
     current_weight,
+    daily_plan_input_key,
     initialize_state,
     profile_weight,
     record_activity,
@@ -107,6 +108,7 @@ class Storage:
         memory=None,
         setup_done=False,
         record_weight=True,
+        wake_time=None,
     ):
         stamp = now.isoformat()
         with self.connect() as db:
@@ -160,6 +162,7 @@ class Storage:
                 (now.date().isoformat(), stamp, "profile_confirmed", json.dumps(profile)),
             )
             if setup_done:
+                self._set_wake_time(db, wake_time)
                 db.execute("DELETE FROM chat_state WHERE key='onboarding'")
                 db.execute(
                     "INSERT OR REPLACE INTO chat_state VALUES ('onboarding_finished','true')"
@@ -184,26 +187,137 @@ class Storage:
         with self.connect() as db:
             db.execute("UPDATE messages SET status=? WHERE id=?", (status, message_id))
 
-    def chat_messages(self):
+    def chat_messages(self, *, now=None):
         """Return every saved chat message, independently of the LLM context window."""
         with self.connect() as db:
+            db.execute("BEGIN")
+            current = None
+            day = now.date().isoformat() if now is not None else None
+            if day:
+                current = db.execute(
+                    "SELECT message_id FROM daily_plans WHERE day=? AND input_key=?",
+                    (day, daily_plan_input_key(db, now)),
+                ).fetchone()
             rows = db.execute(
-                "SELECT m.id,m.created_at,m.role,m.content,m.status,tr.action AS topic_action,t.title AS topic_title "
+                "SELECT m.id,m.created_at,m.role,m.content,"
+                "CASE WHEN m.status='daily_plan' AND m.day=? AND m.id IS NOT ? "
+                "THEN 'outdated_daily_plan' ELSE m.status END AS status,"
+                "tr.action AS topic_action,t.title AS topic_title "
                 "FROM messages m LEFT JOIN topic_transitions tr ON tr.message_id=m.id "
-                "LEFT JOIN topics t ON t.id=tr.topic_id ORDER BY m.id"
+                "LEFT JOIN topics t ON t.id=tr.topic_id ORDER BY m.id",
+                (day, current["message_id"] if current else None),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def saved_baskets(self, after_id=0, *, latest=False):
-        """Read completed basket replies written after the display cursor."""
+    def saved_baskets(self, after_id=0, *, latest=False, include_daily=False, now=None):
+        """Read completed baskets and, for chat synchronization, daily plans."""
         order = "DESC LIMIT 1" if latest else "ASC"
+        daily = " OR status='daily_plan'" if include_daily else ""
         with self.connect() as db:
+            db.execute("BEGIN")
+            current = ""
+            params = [after_id, "Корзина ВкусВилла: <https://vkusvill.ru/"]
+            if now is not None:
+                current = (
+                    " AND (status!='daily_plan' OR day!=? OR id IN "
+                    "(SELECT message_id FROM daily_plans WHERE day=? AND input_key=?))"
+                )
+                day = now.date().isoformat()
+                params.extend((day, day, daily_plan_input_key(db, now)))
             rows = db.execute(
-                "SELECT id,content FROM messages WHERE id>? AND role='assistant' "
-                "AND status='complete' AND instr(content, ?) > 0 ORDER BY id " + order,
-                (after_id, "Корзина ВкусВилла: <https://vkusvill.ru/"),
+                "SELECT id,content,status FROM messages WHERE id>? AND role='assistant' "
+                "AND ((status IN ('complete','daily_plan') AND instr(content, ?) > 0)"
+                + daily
+                + ")"
+                + current
+                + " ORDER BY id "
+                + order,
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def wake_time(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='wake_time'").fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _set_wake_time(db, value):
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('wake_time',?)", (value or "",))
+
+    def set_wake_time(self, value):
+        with self.connect() as db:
+            self._set_wake_time(db, value)
+
+    def daily_plan_status(self, now):
+        day = now.date().isoformat()
+        with self.connect() as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT * FROM daily_plans WHERE day=?", (day,)).fetchone()
+            if row and row["message_id"] is None and row["expires_at"] > now.timestamp():
+                return "pending"
+            if (
+                row
+                and row["message_id"] is not None
+                and row["input_key"] == daily_plan_input_key(db, now)
+            ):
+                return "saved"
+            return "missing"
+
+    def current_daily_plan(self, now, *, before_id):
+        with self.connect() as db:
+            db.execute("BEGIN")
+            row = db.execute(
+                "SELECT m.content FROM daily_plans d JOIN messages m ON m.id=d.message_id "
+                "WHERE d.day=? AND d.input_key=? AND m.id<?",
+                (now.date().isoformat(), daily_plan_input_key(db, now), before_id),
+            ).fetchone()
+        return row["content"] if row else ""
+
+    def reserve_daily_plan(self, now):
+        day = now.date().isoformat()
+        attempt = str(uuid4())
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            input_key = daily_plan_input_key(db, now)
+            row = db.execute(
+                "SELECT d.expires_at,d.input_key,m.content FROM daily_plans d "
+                "LEFT JOIN messages m ON m.id=d.message_id WHERE d.day=?",
+                (day,),
+            ).fetchone()
+            if row:
+                if row["content"] is not None and row["input_key"] == input_key:
+                    return None, row["content"]
+                if row["content"] is None and row["expires_at"] > now.timestamp():
+                    return None, None
+            db.execute(
+                "INSERT OR REPLACE INTO daily_plans(day,attempt,expires_at,input_key) VALUES (?,?,?,?)",
+                (day, attempt, now.timestamp() + 30 * 60, input_key),
+            )
+        return attempt, None
+
+    def finish_daily_plan(self, day, attempt, content, now):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute(
+                "SELECT 1 FROM daily_plans WHERE day=? AND attempt=? AND message_id IS NULL AND input_key=?",
+                (day, attempt, daily_plan_input_key(db, now)),
+            ).fetchone():
+                return False
+            message = db.execute(
+                "INSERT INTO messages(day,created_at,role,content,status) "
+                "VALUES (?,?,'assistant',?,'daily_plan')",
+                (day, now.isoformat(), content),
+            ).lastrowid
+            db.execute("UPDATE daily_plans SET message_id=? WHERE day=?", (message, day))
+            return True
+
+    def release_daily_plan(self, day, attempt):
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM daily_plans WHERE day=? AND attempt=? AND message_id IS NULL",
+                (day, attempt),
+            )
 
     def history(self, since):
         with self.connect() as db:
@@ -299,6 +413,7 @@ class Storage:
             for table in (
                 "profiles",
                 "goals",
+                "daily_plans",
                 "messages",
                 "changes",
                 "summaries",

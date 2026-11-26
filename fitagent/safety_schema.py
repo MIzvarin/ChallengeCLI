@@ -1,4 +1,4 @@
-"""Closed Luna safety contract and fail-closed semantic validation."""
+"""Closed safety response contract and fail-closed semantic validation."""
 
 import json
 import re

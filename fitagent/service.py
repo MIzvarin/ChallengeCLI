@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta
 
 from fitagent.chat_actions import ChatActions
+from fitagent.daily_plan import daily_plan_context
 from fitagent.domain import (
     SYSTEM_PROMPT,
     age_on,
@@ -330,18 +331,22 @@ class FitnessService:
         if not self.current_profile():
             raise ValueError("Сначала заполните профиль в чате.")
         system = self.system()
-        message_id = self.store.message("user", question, self.clock(), "pending")
+        now = self.clock()
+        message_id = self.store.message("user", question, now, "pending")
         try:
             # Use the current clock even when tests or callers replace it after construction.
             self.memory.clock = self.clock
             self.topics.clock = self.clock
-            memory = self.memory.prepare(message_id, question, topics=self.topics)
+            daily = daily_plan_context(self.store, now, question, message_id)
+            memory = self.memory.prepare(message_id, question, topics=self.topics, daily_plan=daily)
             profile = self.profile_for_memory(memory)
             goal = self.store.latest("goals")
             system = self.system({"profile": profile, "goal": goal})
             plan = memory["dialogue"]
             self.topics.prepare_checkpoints(plan, system, self.summarize)
             history = self.topics.context(plan, system, self.compact)
+            if daily:
+                history = "\n\n".join(part for part in (history, daily) if part)
             nutrition_request = {"action": "none"}
             nutrition_payload, safety_result = None, None
             if self.nutrition:

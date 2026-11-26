@@ -17,7 +17,7 @@ from textual.widgets import Input, RichLog
 from fitagent.domain import validate_profile
 from fitagent.memory import project
 from fitagent.memory_schema import EXTRACTION_SCHEMA, MEMORY_ERROR, parse_extraction
-from fitagent.provider import MEMORY_MODEL, MEMORY_URL, ModelClient
+from fitagent.provider import DEFAULT_MODEL, MEMORY_URL, ModelClient
 from fitagent.service import FitnessService
 from fitagent.storage import Storage
 from fitagent.ui import FitAgentApp
@@ -102,7 +102,7 @@ def error(callback, expected=None):
     raise AssertionError("Expected safe validation failure")
 
 
-def luna_reply(text=EMPTY, **changes):
+def responses_reply(text=EMPTY, **changes):
     data = {
         "status": "completed",
         "output": [
@@ -146,19 +146,19 @@ def test_schema_is_closed_and_all_object_properties_are_required():
     visit(EXTRACTION_SCHEMA)
 
 
-def test_luna_uses_go_native_responses_strict_schema_same_key_and_session():
+def test_flash_uses_go_responses_strict_schema_same_key_and_session():
     with tempfile.TemporaryDirectory() as directory:
         store = Storage(directory)
         client = real_client(store)
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
-            transport.post.return_value = luna_reply()
+            transport.post.return_value = responses_reply()
             messages = [{"role": "user", "content": "PRIVATE_TEST_TEXT"}]
             assert client.generate_structured(messages, EXTRACTION_SCHEMA) == EMPTY
             call = transport.post.call_args
             assert call.args == (MEMORY_URL,)
             payload = call.kwargs["json"]
-            assert payload["model"] == MEMORY_MODEL == "gpt-6-luna"
+            assert payload["model"] == DEFAULT_MODEL == "deepseek-v4.1-flash"
             assert payload["input"] == messages
             assert payload["store"] is False and payload["stream"] is False
             assert payload["reasoning"] == {"effort": "none"}
@@ -179,7 +179,7 @@ def test_luna_uses_go_native_responses_strict_schema_same_key_and_session():
         assert "TEST_SECRET" not in store.logs() and "PRIVATE_TEST_TEXT" not in store.logs()
 
 
-def test_luna_rejects_refusal_incomplete_empty_wrong_protocol_and_retains_usage():
+def test_structured_client_rejects_refusal_incomplete_empty_wrong_protocol_and_retains_usage():
     variants = [
         {"status": "incomplete"},
         {"status": "failed"},
@@ -222,7 +222,7 @@ def test_luna_rejects_refusal_incomplete_empty_wrong_protocol_and_retains_usage(
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
             for variant in variants:
-                transport.post.return_value = luna_reply(**variant)
+                transport.post.return_value = responses_reply(**variant)
                 assert "TEST_SECRET" not in error(
                     lambda: client.generate_structured([], EXTRACTION_SCHEMA)
                 )
@@ -619,7 +619,7 @@ def test_end_to_end_go_memory_usage_history_and_new_session():
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
             transport.post.side_effect = [
-                luna_reply(
+                responses_reply(
                     json.dumps(
                         {
                             "operations": [operation()],
@@ -629,7 +629,7 @@ def test_end_to_end_go_memory_usage_history_and_new_session():
                         }
                     )
                 ),
-                luna_reply(safety_json()),
+                responses_reply(safety_json()),
                 httpx.Response(
                     200,
                     json={
@@ -638,7 +638,10 @@ def test_end_to_end_go_memory_usage_history_and_new_session():
                     },
                 ),
             ]
-            transport.post.side_effect = [*transport.post.side_effect, luna_reply(safety_json())]
+            transport.post.side_effect = [
+                *transport.post.side_effect,
+                responses_reply(safety_json()),
+            ]
             service.answer("Не люблю брокколи")
             assert transport.post.call_args_list[0].args == (MEMORY_URL,)
             chat = transport.post.call_args_list[2].kwargs["json"]
@@ -653,7 +656,7 @@ def test_end_to_end_go_memory_usage_history_and_new_session():
             service.clear()
             assert not facts(service) and store.token_usage()["requests"] == 0
             transport.post.side_effect = None
-            transport.post.return_value = luna_reply()
+            transport.post.return_value = responses_reply()
             client.generate_structured([], EXTRACTION_SCHEMA)
             assert client.session_id != old_session
             assert (

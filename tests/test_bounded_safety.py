@@ -6,9 +6,9 @@ import unittest
 from unittest.mock import patch
 
 from support import safe_response, safety_json
-from test_memory import error, fixture, luna_reply, real_client
+from test_memory import error, fixture, real_client, responses_reply
 
-from fitagent.provider import MEMORY_OUTPUT_LIMIT
+from fitagent.provider import DEFAULT_MODEL, MEMORY_OUTPUT_LIMIT
 from fitagent.safety_schema import (
     SAFETY_ERROR,
     SAFETY_SCHEMA,
@@ -41,7 +41,7 @@ def test_real_client_sends_the_bounded_schema_without_extra_requests_or_larger_t
         messages = [{"role": "user", "content": json.dumps({"required_rule_ids": required})}]
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
-            transport.post.return_value = luna_reply(safety_json(required))
+            transport.post.return_value = responses_reply(safety_json(required))
             raw = client.generate_safety(messages, "response")
             assert parse_safety(raw, required, exact=True)["status"] == "allow"
             payload = transport.post.call_args.kwargs["json"]
@@ -55,6 +55,7 @@ def test_real_client_sends_the_bounded_schema_without_extra_requests_or_larger_t
             checks = schema["properties"]["checks"]
             assert checks["minItems"] == checks["maxItems"] == len(required)
             assert checks["items"]["properties"]["rule_id"]["enum"] == required
+            assert payload["model"] == DEFAULT_MODEL == "deepseek-v4.1-flash"
             assert payload["max_output_tokens"] == MEMORY_OUTPUT_LIMIT == 8192
             assert payload["text"]["format"]["strict"] is True
             assert transport.post.call_count == 1

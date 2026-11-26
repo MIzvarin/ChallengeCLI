@@ -1,4 +1,4 @@
-"""Independent Luna checks; no raw safety reasoning is forwarded to the chat model."""
+"""Separate safety checks; no raw safety reasoning is forwarded to chat generation."""
 
 import json
 

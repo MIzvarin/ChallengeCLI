@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 from support import safe_response, safety_json
-from test_memory import error, fixture, luna_reply, real_client
+from test_memory import error, fixture, real_client, responses_reply
 
 from fitagent.memory_schema import MEMORY_ERROR, validate_shape
 from fitagent.safety_schema import (
@@ -239,7 +239,7 @@ def test_provider_diagnostics_distinguish_incomplete_truncated_refused_and_empty
         with patch("fitagent.provider.httpx.Client") as factory:
             transport = factory.return_value.__enter__.return_value
             for value, reason in cases:
-                transport.post.return_value = luna_reply(**value)
+                transport.post.return_value = responses_reply(**value)
                 assert (
                     error(
                         lambda: service.safety.check(

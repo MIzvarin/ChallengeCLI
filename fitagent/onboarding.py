@@ -1,6 +1,7 @@
 """Resumable one-question-at-a-time chat questionnaire; no TUI dependencies."""
 
 import json
+import re
 
 from fitagent.domain import (
     bmi_warning,
@@ -44,7 +45,11 @@ QUESTIONS = (
     ),
     (
         "training",
-        "Есть ли программа тренировок? Опишите упражнения, частоту и нагрузку или напишите «нет».",
+        "Есть ли программа тренировок? Укажите дни, упражнения и нагрузку или напишите «нет».",
+    ),
+    (
+        "wake_time",
+        "Во сколько вы обычно встаёте? Укажите время в формате ЧЧ:ММ или напишите «нет», если время меняется.",
     ),
 )
 FACT_FIELDS = {
@@ -68,7 +73,16 @@ FIELD_NAMES = {
     "добавки": "supplements",
     "лекарства": "medications",
     "тренировки": "training",
+    "подъём": "wake_time",
 }
+
+
+def validate_wake_time(text):
+    if text.casefold() == "нет":
+        return None
+    if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", text):
+        raise ValueError("В поле «Время подъёма» укажите ЧЧ:ММ от 00:00 до 23:59 или «нет».")
+    return text
 
 
 class ChatOnboarding:
@@ -113,6 +127,8 @@ class ChatOnboarding:
         return self.prompt(state)
 
     def validate_answer(self, name, text):
+        if name == "wake_time":
+            return validate_wake_time(text)
         if not text or len(text) > (4000 if name == "goal" else 500):
             raise ValueError(
                 "Введите непустой ответ: до 4000 символов для цели, до 500 для остальных полей."
@@ -223,6 +239,7 @@ class ChatOnboarding:
             False,
             memory=memory,
             setup_done=True,
+            wake_time=answers["wake_time"],
         )
         notice = (
             "\nПредупреждение безопасности: " + result["description"]
