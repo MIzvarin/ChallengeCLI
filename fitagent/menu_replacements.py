@@ -87,7 +87,11 @@ def priced_menu(nutrition, meals, summary, cards, budget, *, targets=None):
     report = nutrition.price_report(purchases, [], budget, audit=False)
     if daily_portions:
         report["daily_portions"] = daily_portions
-    if estimated:
+        for day, portions in sorted(daily_portions.items()):
+            totals = format_catalog_totals(catalog_totals(portions))
+            if totals:
+                lines.append(f"Итого за день {day} по карточкам — {totals}.")
+    if estimated or daily_portions:
         totals = format_catalog_totals(catalog_totals(purchases))
         summary = "По выбранным порциям за весь период — " + totals + "." if totals else ""
     return "\n\n".join([*lines, summary]), report

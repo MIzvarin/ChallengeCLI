@@ -17,12 +17,26 @@ def write_topic_notice(chat, action, title):
         chat.write(Text(f"↳ {label}: {title}", style="#929292"))
 
 
+def basket_display(content):
+    """Remove the advisory appendix from previously saved shopping outcomes."""
+    if not (
+        "Корзина ВкусВилла: <https://vkusvill.ru/" in content
+        or content.startswith(("Не удалось подобрать рацион,", "Для подбора рациона под вашу цель"))
+    ):
+        return content
+    result, marker, appendix = content.partition("\n\nПредупреждение безопасности: ")
+    if marker:
+        _, memory, updates = appendix.partition("\n\nПамять обновлена:")
+        return result + memory + updates
+    return content
+
+
 def write_message(chat, role, content, created_at="", status="complete"):
     assistant = role == "assistant"
     title = "FitAgent" if assistant else "Вы"
     if created_at:
         title += f" · {created_at[:10]}"
-    body = Markdown(content) if assistant else Text(content)
+    body = Markdown(basket_display(content)) if assistant else Text(content)
     notice = {
         "failed": "Ответ не получен. При необходимости отправьте вопрос ещё раз.",
         "pending": "Запрос не завершён. При необходимости отправьте вопрос ещё раз.",

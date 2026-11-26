@@ -166,6 +166,34 @@ def test_history_read_error_is_understandable():
     asyncio.run(read_error_flow())
 
 
+def test_external_basket_reaches_open_chat_and_can_be_recalled_without_api():
+    from fitagent.plan_mcp import request_plan
+
+    async def scenario(directory):
+        _, client, service = fixture(directory)
+        app = FitAgentApp(service)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            other = Storage(directory)
+            answer = (
+                "Корзина ВкусВилла: <https://vkusvill.ru/mobile?basket&share=123>"
+                "\n\nПредупреждение безопасности: Замечание к черновику."
+            )
+            other.message("assistant", answer, NOW)
+            await asyncio.sleep(2.1)
+            await pilot.pause()
+            app.sync_baskets()
+            assert chat_text(app).count("share=123") == 1
+            assert "Замечание к черновику" not in chat_text(app)
+            recalled = await request_plan(directory, "последняя корзина")
+            assert "share=123" in recalled and "Замечание" not in recalled
+            assert len(other.saved_baskets()) == 1
+            assert not client.generate.called
+
+    with tempfile.TemporaryDirectory() as directory:
+        asyncio.run(scenario(directory))
+
+
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(
         unittest.FunctionTestCase(value)

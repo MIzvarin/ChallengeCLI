@@ -527,6 +527,7 @@ class FitnessService:
         proposal=None,
         *,
         keep_plan=False,
+        show_warnings=True,
     ):
         draft = response
         if proposal:
@@ -555,7 +556,7 @@ class FitnessService:
                 if result["status"] == "warning"
             )
         )
-        if warnings:
+        if warnings and show_warnings:
             response += "\n\nПредупреждение безопасности: " + " ".join(warnings)
         if memory["notifications"]:
             response += "\n\nПамять обновлена:\n" + "\n".join(

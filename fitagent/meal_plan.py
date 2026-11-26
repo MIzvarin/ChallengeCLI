@@ -145,6 +145,7 @@ def plan_from_context(service, payload, memory, *, shop=True):
         payload["safety"],
         proposal,
         keep_plan=True,
+        show_warnings=False,
     )
     if catalog_unavailable:
         result += "\n\nПодбор товаров недоступен. Попробуйте повторить /plan позже."

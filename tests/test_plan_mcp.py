@@ -615,6 +615,37 @@ def test_numeric_targets_check_each_day_and_use_lower_supplier_value():
     assert not check_targets(targets, [double, double], {1: [double], 2: [double]})
 
 
+def test_failed_menu_shows_final_reason_without_attempt_warnings():
+    with tempfile.TemporaryDirectory() as directory:
+        store, client, service = fixture(directory)
+        service.save(profile())
+        catalog = attach(service, client)
+        fallback = client.generate_structured.side_effect
+
+        def structured(messages, schema, purpose="memory_extraction"):
+            if purpose == "nutrition_plan":
+                return json.dumps({"plan": DIET})
+            if purpose == "nutrition_goal_check":
+                return json.dumps({"status": "revise", "description": "Не хватает продуктов."})
+            if purpose == "nutrition_replacements":
+                return json.dumps({"queries": [], "meals": [], "nutrition_summary": ""})
+            return fallback(messages, schema, purpose)
+
+        client.generate_structured.side_effect = structured
+        client.generate_safety.side_effect = lambda messages, stage: safety_json(
+            json.loads(messages[-1]["content"])["required_rule_ids"],
+            "warning",
+            "Промежуточное замечание.",
+            "advisory",
+        )
+        outcome = tool_call(service, {"requirements": "На день, готовлю дома."})
+        reply = outcome["content"][0]["text"]
+        assert not outcome["isError"] and reply.count("Не хватает продуктов.") == 1
+        assert "Промежуточное замечание" not in reply
+        assert store.chat_messages()[-1]["content"] == reply
+        catalog.cart_link.assert_not_called()
+
+
 def test_conflicting_numeric_targets_show_a_russian_input_error():
     with tempfile.TemporaryDirectory() as directory:
         _, client, service = fixture(directory)
@@ -878,6 +909,36 @@ def test_estimated_portion_adjustment_uses_catalog_bounds_without_changing_ingre
         assert 550 < portions[0]["amount"] <= 550 * 1.35
         assert check_targets(targets, portions) == ""
         assert "По выбранным порциям" in text
+
+
+def test_two_day_summary_uses_each_days_portions_and_discards_draft_estimate():
+    from fitagent.menu_replacements import priced_menu
+    from fitagent.shopping import product_data
+
+    card = product_data(
+        raw_product(
+            properties=[
+                {"name": "Состав", "value": "Крупа"},
+                {"name": "Пищевая ценность в 100 г", "value": "350–360 ккал"},
+            ]
+        )
+    )
+    meals = [
+        {
+            "day": day,
+            "title": "Обед",
+            "portions": [{"id": card["id"], "amount": amount, "measure": "г"}],
+        }
+        for day, amount in [(1, 100), (2, 200)]
+    ]
+    with tempfile.TemporaryDirectory() as directory:
+        _, client, service = fixture(directory)
+        attach(service, client)
+        text, _ = priced_menu(service.nutrition, meals, "9999 ккал", {card["id"]: card}, None)
+    assert "Итого за день 1 по карточкам — ккал 350.0–360.0" in text
+    assert "Итого за день 2 по карточкам — ккал 700.0–720.0" in text
+    assert "за весь период — ккал 1050.0–1080.0" in text
+    assert "9999" not in text
 
 
 def load_tests(loader, tests, pattern):

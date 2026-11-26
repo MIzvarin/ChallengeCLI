@@ -6,6 +6,7 @@ import os
 import sys
 from time import monotonic
 
+from fitagent.chat import basket_display
 from fitagent.meal_plan import PROFILE_ERROR, create_plan, plan_from_context
 from fitagent.nutrition import NUTRITION_ERROR
 from fitagent.nutrition_targets import TARGET_RANGE_ERROR
@@ -39,7 +40,12 @@ def tool_call(service, arguments, turn=None):
         requirements = arguments.get("requirements", "")
         if not isinstance(requirements, str) or len(requirements) > 2000:
             raise ValueError(invalid)
-        if turn is None:
+        if turn is None and requirements.strip().casefold() == "последняя корзина":
+            saved = service.store.saved_baskets(latest=True)
+            message = (
+                basket_display(saved[0]["content"]) if saved else "Сохранённых корзин пока нет."
+            )
+        elif turn is None:
             message = create_plan(service, requirements)
         else:
             message = plan_from_context(service, turn["payload"], turn["memory"], shop=turn["shop"])

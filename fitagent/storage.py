@@ -194,6 +194,17 @@ class Storage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def saved_baskets(self, after_id=0, *, latest=False):
+        """Read completed basket replies written after the display cursor."""
+        order = "DESC LIMIT 1" if latest else "ASC"
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id,content FROM messages WHERE id>? AND role='assistant' "
+                "AND status='complete' AND instr(content, ?) > 0 ORDER BY id " + order,
+                (after_id, "Корзина ВкусВилла: <https://vkusvill.ru/"),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def history(self, since):
         with self.connect() as db:
             messages = db.execute(

@@ -1,6 +1,7 @@
 """Minimal Textual screens; business rules live in FitnessService."""
 
 import asyncio
+import sqlite3
 from datetime import date
 
 from textual import work
@@ -9,7 +10,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Footer, Input, RichLog, Select, Static
 
-from fitagent.chat import write_message, write_topic_notice
+from fitagent.chat import basket_display, write_message, write_topic_notice
 from fitagent.domain import PROFILE_SEX_OPTIONS
 from fitagent.goal_state import LABELS
 from fitagent.loader import ResponseLoader
@@ -84,6 +85,7 @@ class FitAgentApp(App):
         super().__init__()
         self.service = service
         self.busy = False
+        self.last_basket_id = 0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="workspace"):
@@ -117,6 +119,7 @@ class FitAgentApp(App):
                 "Не удалось подготовить профиль и опрос. Перезапустите приложение и проверьте доступ к папке данных."
             )
         self.restore_chat()
+        self.set_interval(2, self.sync_baskets)
         self.set_interval(60, self.check_reminder)
         self.query_one("#question", Input).focus()
 
@@ -132,6 +135,8 @@ class FitAgentApp(App):
             return
         if not messages:
             chat.write("Питание, тренировки и ваш прогресс. Начните с вопроса.")
+        if messages:
+            self.last_basket_id = messages[-1]["id"]
         for message in messages:
             write_message(
                 chat,
@@ -141,6 +146,21 @@ class FitAgentApp(App):
                 message["status"],
             )
             write_topic_notice(chat, message.get("topic_action"), message.get("topic_title"))
+
+    def sync_baskets(self, local_answer=None):
+        if (self.busy and local_answer is None) or len(self.screen_stack) != 1:
+            return
+        try:
+            baskets = self.service.store.saved_baskets(self.last_basket_id)
+        except (OSError, sqlite3.Error):
+            return
+        for basket in baskets:
+            if (
+                basket["content"] != local_answer
+                and basket_display(basket["content"]) != local_answer
+            ):
+                write_message(self.query_one("#chat", RichLog), "assistant", basket["content"])
+            self.last_basket_id = basket["id"]
 
     def refresh_profile(self, saved=None):
         profile = self.service.current_profile()
@@ -205,6 +225,7 @@ class FitAgentApp(App):
                 "Не удалось очистить данные. Повторите попытку; проверьте доступ к папке данных."
             )
             return
+        self.last_basket_id = 0
         log.clear()
         log.write("Данные очищены. Начата новая сессия.")
         self.query_one("#question", Input).value = ""
@@ -270,6 +291,7 @@ class FitAgentApp(App):
         elif text == "/help":
             self.query_one("#chat", RichLog).write(
                 "/plan [условия] — составить программу питания через MCP FitAgent.\n"
+                "/plan последняя корзина — показать сохранённую корзину.\n"
                 "/profile — профиль только для чтения; изменения сообщайте в чате. /progress — вес.\n"
                 "/memory — факты; /memory edit НОМЕР текст — исправить; "
                 "/memory delete НОМЕР — удалить обычный факт. Эти команды не обращаются к API.\n"
@@ -334,6 +356,7 @@ class FitAgentApp(App):
                 )
             if notice:
                 write_topic_notice(log, notice["action"], notice["title"])
+            self.sync_baskets(local_answer=answer)
             write_message(log, "assistant", answer)
             self.refresh_profile()
             self.refresh_sex_selection()
