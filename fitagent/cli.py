@@ -35,7 +35,14 @@ def build_service(store):
 
         return asyncio.run(request_plan(store.directory, "", turn=turn))
 
-    return FitnessService(store, client, nutrition=nutrition, chat_plan=chat_plan)
+    def training_request(name, arguments):
+        from fitagent.training_mcp import request_training
+
+        return asyncio.run(request_training(store.directory, name, arguments))
+
+    return FitnessService(
+        store, client, nutrition=nutrition, chat_plan=chat_plan, training_request=training_request
+    )
 
 
 def main(argv=None, *, from_chat=False):
@@ -43,8 +50,8 @@ def main(argv=None, *, from_chat=False):
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["logs", "mcp"],
-        help="logs — журнал, mcp — локальный сервер по stdio",
+        choices=["logs", "mcp", "training-mcp"],
+        help="logs — журнал; mcp — планы дня и питания; training-mcp — программы тренировок",
     )
     args = parser.parse_args(argv)
     try:
@@ -65,6 +72,11 @@ def main(argv=None, *, from_chat=False):
         from fitagent.plan_mcp import serve
 
         serve(service, from_chat=from_chat)
+        return
+    if args.command == "training-mcp":
+        from fitagent.training_mcp import serve
+
+        serve(service)
         return
     if args.command == "logs":
         try:

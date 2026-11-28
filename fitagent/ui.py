@@ -20,8 +20,11 @@ from fitagent.logs import LogsPanel
 from fitagent.onboarding import validate_wake_time
 from fitagent.plan_mcp import request_plan
 from fitagent.token_chart import TokensScreen
+from fitagent.training import ACCEPT as ACCEPT_TRAINING
 
-COMMAND_HINT = "/plan  /profile  /progress  /memory  /logs  /tokens  /clear  /help  /exit"
+COMMAND_HINT = (
+    "/plan  /training  /profile  /progress  /memory  /logs  /tokens  /clear  /help  /exit"
+)
 
 
 class FitAgentApp(App):
@@ -354,6 +357,8 @@ class FitAgentApp(App):
             self.query_one("#chat", RichLog).write(
                 "/plan [условия] — составить программу питания через MCP FitAgent.\n"
                 "/plan последняя корзина — показать сохранённую корзину.\n"
+                "/training [условия] — составить программу тренировок; /training выход — закрыть согласование.\n"
+                "«Подтверждаю программу тренировок» — сохранить показанный черновик в памяти.\n"
                 "/wake ЧЧ:ММ или /wake нет — изменить время подъёма для будущих планов дня.\n"
                 "/profile — профиль только для чтения; изменения сообщайте в чате. /progress — вес.\n"
                 "/memory — факты; /memory edit НОМЕР текст — исправить; "
@@ -383,7 +388,7 @@ class FitAgentApp(App):
                 "используется DeepSeek Flash. Условия обработки данных: opencode.ai/docs/go/#privacy. "
                 "Ответы не заменяют врача."
             )
-        elif text == "/plan" or text.startswith("/plan "):
+        elif text in {"/plan", "/training"} or text.startswith(("/plan ", "/training ")):
             self.ask(text)
         elif text.startswith(("/confirm", "/cancel")):
             self.ask(text)
@@ -405,8 +410,11 @@ class FitAgentApp(App):
         status.update("Ctrl+L · журнал")
         loader = self.query_one("#response-loader", ResponseLoader)
         loader.start()
+        was_training_paused = None
         try:
             had_profile = bool(self.service.current_profile())
+            if had_profile:
+                was_training_paused = self.service.store.training_paused()
             normal_turn = had_profile and not text.startswith("/")
             if text == "/plan" or text.startswith("/plan "):
                 answer = await request_plan(self.service.store.directory, text[5:].strip())
@@ -430,7 +438,9 @@ class FitAgentApp(App):
             )
             self.refresh_profile()
             self.refresh_sex_selection()
-            if not had_profile and self.service.current_profile():
+            if (not had_profile and self.service.current_profile()) or (
+                had_profile and text.casefold() == ACCEPT_TRAINING
+            ):
                 self.show_daily_plan()
         except Exception as exc:
             # No traceback/request payload in UI or logs; audit only exception type.
@@ -450,3 +460,10 @@ class FitAgentApp(App):
             selector.value = Select.BLANK
             selector.disabled = False
             field.focus()
+            if was_training_paused is False:
+                try:
+                    needs_refresh = self.service.store.training_paused()
+                except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                    needs_refresh = False
+                if needs_refresh:
+                    self.show_daily_plan()

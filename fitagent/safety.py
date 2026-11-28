@@ -17,6 +17,18 @@ def safety_rules(snapshot, now):
     ]
 
 
+class SafetyBlocked(ValueError):
+    """A validated safety verdict blocked the operation."""
+
+    def __init__(self, action, description):
+        self.reason = f"{action}\nПричина: {description.strip()}"
+        super().__init__(
+            self.reason + "\nМожно попросить безопасный вариант или задать другой вопрос. "
+            "Если сведения об ограничениях ошибочны, опишите исправление в чате — "
+            "его нужно будет подтвердить. Сохранённые данные не изменены."
+        )
+
+
 class SafetyGuard:
     """Fail closed on transport/protocol errors; warnings alone do not block requests."""
 
@@ -120,12 +132,5 @@ class SafetyGuard:
                 "response": "Не могу показать подготовленный ответ.",
                 "goal_response": "Не могу показать эту оценку цели.",
             }.get(stage, "Не могу выполнить эту просьбу.")
-            raise ValueError(
-                action
-                + "\nПричина: "
-                + public["description"].strip()
-                + "\nМожно попросить безопасный вариант или задать другой вопрос. "
-                "Если сведения об ограничениях ошибочны, опишите исправление в чате — "
-                "его нужно будет подтвердить. Сохранённые данные не изменены."
-            )
+            raise SafetyBlocked(action, public["description"])
         return public

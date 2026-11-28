@@ -253,29 +253,38 @@ def portion_multiplier(targets, products):
 
 
 def check_targets(targets, products, days=None):
-    """Return the first unmet or unverifiable target, or an empty string."""
+    """Return a comment on unmet or unverifiable targets."""
+    issues = []
     for limit in targets["limits"]:
         metric = limit["metric"]
         label = METRICS[metric]
         portions = [products]
         if limit["scope"] == "daily":
             if targets["days"] is None:
-                return "Уточните, на сколько полных дней нужен рацион с суточными ориентирами."
+                issues.append(
+                    "Уточните, на сколько полных дней нужен рацион с суточными ориентирами."
+                )
+                continue
             if targets["days"] > 1:
                 if not days or set(days) != set(range(1, targets["days"] + 1)):
-                    return (
+                    issues.append(
                         "Укажите порции отдельно на каждый день, чтобы сверить суточные ориентиры."
                     )
+                    continue
                 portions = days.values()
         minimum, maximum = target_bounds(limit)
         for items in portions:
             totals = catalog_totals(items, (metric,))
             if metric not in totals:
-                return f"В карточках не хватает данных, чтобы проверить показатель «{label}» по порциям."
+                issues.append(
+                    f"В карточках не хватает данных, чтобы проверить показатель «{label}» по порциям."
+                )
+                break
             low, high = totals[metric]
             if (minimum is not None and low < minimum) or (maximum is not None and high > maximum):
-                return (
-                    f"Показатель «{label}» по порциям составляет {low:.1f}–{high:.1f}. "
-                    "Скорректируйте блюда или порции до заданного диапазона."
+                amount = f"{low:.1f}" if low == high else f"{low:.1f}–{high:.1f}"
+                issues.append(
+                    f"Показатель «{label}» по порциям составляет {amount} и выходит за заданные пределы."
                 )
-    return ""
+                break
+    return " ".join(dict.fromkeys(issues))

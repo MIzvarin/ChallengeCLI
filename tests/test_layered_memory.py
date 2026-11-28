@@ -57,6 +57,8 @@ def test_first_start_is_resumable_stepwise_chat_and_saves_all_required_categorie
         error(lambda: reopened.chat("24:00"), "ЧЧ:ММ")
         response = reopened.chat(ANSWERS[-1])
         assert "сохранены" in response
+        assert "составь программу тренировок" in response
+        assert reopened.memory.repository.load(NOW)["training_program"] is None
         assert reopened.current_profile()["birth_date"] == ANSWERS[0]
         assert store.wake_time() == "07:30"
         facts = reopened.memory.repository.load(NOW)["facts"]

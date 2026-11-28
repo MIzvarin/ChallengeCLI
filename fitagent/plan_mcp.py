@@ -99,8 +99,17 @@ def tool_call(service, arguments, turn=None, *, name=NAME):
 
 
 def serve(service, source=None, sink=None, *, from_chat=False):
+    def invoke(name, params):
+        turn = params.get("_meta", {}).get("fitagent/turn") if from_chat and name == NAME else None
+        return tool_call(service, params.get("arguments", {}), turn, name=name)
+
+    serve_tools("fitagent", (TOOL, DAILY_TOOL), invoke, source, sink)
+
+
+def serve_tools(server_name, tools, invoke, source=None, sink=None):
     source = sys.stdin if source is None else source
     sink = sys.stdout if sink is None else sink
+    names = {tool["name"] for tool in tools}
     initialized = False
     for line in source:
         identifier = None
@@ -117,25 +126,15 @@ def serve(service, source=None, sink=None, *, from_chat=False):
                 result = {
                     "protocolVersion": PROTOCOL,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "fitagent", "version": "0.1.0"},
+                    "serverInfo": {"name": server_name, "version": "0.1.0"},
                 }
                 initialized = True
             elif method == "ping":
                 result = {}
             elif initialized and method == "tools/list":
-                result = {"tools": [TOOL, DAILY_TOOL]}
-            elif (
-                initialized
-                and method == "tools/call"
-                and params.get("name") in (NAME, daily_plan.NAME)
-            ):
-                name = params["name"]
-                turn = (
-                    params.get("_meta", {}).get("fitagent/turn")
-                    if from_chat and name == NAME
-                    else None
-                )
-                result = tool_call(service, params.get("arguments", {}), turn, name=name)
+                result = {"tools": tools}
+            elif initialized and method == "tools/call" and params.get("name") in names:
+                result = invoke(params["name"], params)
             else:
                 reply = {"error": {"code": -32601, "message": "Метод или инструмент недоступен."}}
                 result = None
@@ -158,11 +157,11 @@ async def request_daily_plan(directory):
     return await request_tool(directory, daily_plan.NAME, {}, daily_plan.ERROR)
 
 
-async def request_tool(directory, name, arguments, error, *, turn=None):
+async def request_tool(directory, name, arguments, error, *, turn=None, module="fitagent.plan_mcp"):
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
-        "fitagent.plan_mcp",
+        module,
         *(["--chat-turn"] if turn is not None else []),
         env=dict(os.environ, FITAGENT_DATA_DIR=str(directory)),
         stdin=asyncio.subprocess.PIPE,

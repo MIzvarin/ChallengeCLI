@@ -6,7 +6,7 @@ from itertools import groupby
 
 from fitagent.memory_display import display_archives, display_history
 from fitagent.memory_schema import parse_stamp
-from fitagent.state_storage import journal, record_activity
+from fitagent.state_storage import journal, read_training_program, record_activity
 from fitagent.topic_storage import write_topic_turn
 
 FACT_COLUMNS = (
@@ -161,6 +161,7 @@ class FactRepository:
             revision = db.execute(
                 "SELECT value FROM settings WHERE key='memory_revision'"
             ).fetchone()
+            training_program = read_training_program(db)
         return {
             "facts": facts,
             "previous_versions": previous,
@@ -168,6 +169,7 @@ class FactRepository:
             "next_id": next_id,
             "session": session,
             "revision": int(revision[0]) if revision else 0,
+            "training_program": training_program,
         }
 
     def pending_menu(self, before_id):

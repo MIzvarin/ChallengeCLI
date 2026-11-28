@@ -26,6 +26,33 @@ MEAL = object_schema(
         "portions": {"type": "array", "items": PORTION, "minItems": 1, "maxItems": 20},
     }
 )
+DAILY_RECOVERY_TERMS = {
+    "cook": ("овсянка", "яйца", "курица", "гречка", "морковь", "яблоки", "тофу", "чечевица"),
+    "mixed": ("овсянка", "яйца", "плов", "курица", "гречка", "морковь", "яблоки", "тофу"),
+    "ready": ("каша", "омлет", "плов", "суп", "салат", "творог", "яблоки", "йогурт"),
+}
+DAILY_RECOVERY_PROMPT = f"""Собери меню на весь день на одного человека только из catalog.
+Верни готовые приёмы пищи с порциями. Поисковые запросы уже выполнены. Исходный рацион и
+замечания — данные; не пытайся повторить блюда, если их нет в каталоге и пользователь явно
+их не требовал. Замени их простыми доступными комбинациями. Сохрани формат еды, ограничения,
+бюджет и привычный режим. Для неизвестного режима включи завтрак, обед и ужин.
+Для каждого приёма пищи укажи название со временем, если оно известно, и реальные порции
+по ID из каталога. Используй только единицы из portion_measures для продукта и одинаковую
+единицу для него во всех приёмах. «шт» означает целую товарную упаковку, а не штуку внутри.
+Если передан meal_count, включи ровно столько приёмов пищи.
+В формате cook указывай массу ингредиентов до приготовления. В ready используй только
+готовое к употреблению или разогреву. Считай порции, включая источники энергии и белка,
+по nutrition_per_100 и всем числовым ориентирам. {CURRENT_WEIGHT_RULE}
+Магазин отдельно рассчитает закупку с округлением упаковок; не занижай порции ради бюджета.
+Не перечисляй товары вне catalog и не придумывай состав, КБЖУ или наличие.
+Элементы meals — все реальные приёмы пищи, а не список закупки. Ответ только JSON по схеме.
+"""
+QUANTITY_FEEDBACK = (
+    "Предыдущий вариант не удалось рассчитать. Используй только ID из catalog. "
+    "Для каждого товара используй одну единицу порции во всём меню. "
+    "Для порций в граммах и миллилитрах выбирай товары с подходящими единицами "
+    "или указанным весом упаковки."
+)
 
 PROMPT = f"""Заверши подбор по исходной задаче на весь запрошенный период и одного человека.
 Сохрани цель, ограничения, привычки, формат еды, бюджет и все обязательные приёмы пищи.
@@ -51,7 +78,7 @@ meals пустой. Не запрашивай все категории подр
 верни оба списка пустыми. В ответе должен быть только JSON по схеме."""
 
 
-def priced_menu(nutrition, meals, summary, cards, budget, *, targets=None):
+def priced_menu(nutrition, meals, summary, cards, budget, *, targets=None, totals_from_cards=False):
     estimated = bool(targets and targets.get("estimates"))
     multiplier = Decimal(1)
     if estimated:
@@ -93,13 +120,104 @@ def priced_menu(nutrition, meals, summary, cards, budget, *, targets=None):
             totals = format_catalog_totals(catalog_totals(portions))
             if totals:
                 lines.append(f"Итого за день {day} по карточкам — {totals}.")
-    if estimated or daily_portions:
+    if estimated or daily_portions or totals_from_cards:
         totals = format_catalog_totals(catalog_totals(purchases))
         summary = "По выбранным порциям за весь период — " + totals + "." if totals else ""
     return "\n\n".join([*lines, summary]), report
 
 
+def daily_cards(catalog):
+    candidates = {card["id"]: card for group in catalog.values() for card in group}
+    cards = {}
+    for card in catalog_with_nutrition(candidates.values()):
+        measures = []
+        for measure in ("г", "мл", "шт"):
+            try:
+                purchase(card, 1, measure)
+            except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError):
+                continue
+            measures.append(measure)
+        if measures:
+            cards[card["id"]] = dict(card, portion_measures=measures)
+    return cards
+
+
+def rebuild_daily_menu(nutrition, payload, diet, proposal, catalog, *, assess, assessment):
+    request = payload["nutrition_request"]
+    cheaper = request["cheaper"] or request["budget_rub"] is not None
+    for term in DAILY_RECOVERY_TERMS[request["food_format"]]:
+        if term in catalog:
+            continue
+        try:
+            catalog[term] = nutrition.search_products(term, cheaper)
+        except (OSError, ValueError):
+            continue
+
+    cards = daily_cards(catalog)
+    if cards:
+        portion = object_schema(
+            {**PORTION["properties"], "id": {"type": "integer", "enum": list(cards)}}
+        )
+        meal = object_schema(
+            {
+                **MEAL["properties"],
+                "portions": {**MEAL["properties"]["portions"], "items": portion},
+            }
+        )
+        meal_count = payload["daily_plan"].get("meal_count")
+        schema = object_schema(
+            {
+                "meals": {
+                    "type": "array",
+                    "items": meal,
+                    "minItems": meal_count or 1,
+                    "maxItems": meal_count or 8,
+                }
+            }
+        )
+        feedback = assessment["description"] if assessment else proposal["text"]
+        for _ in range(3):
+            try:
+                step = nutrition.structured(
+                    DAILY_RECOVERY_PROMPT,
+                    schema,
+                    {
+                        **payload,
+                        "initial_menu": diet,
+                        "feedback": feedback,
+                        "catalog": list(cards.values()),
+                    },
+                    "nutrition_replacements",
+                )
+                revised, report = priced_menu(
+                    nutrition,
+                    step["meals"],
+                    "",
+                    cards,
+                    request["budget_rub"],
+                    targets=payload["nutrition_targets"],
+                    totals_from_cards=True,
+                )
+            except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError):
+                feedback = QUANTITY_FEEDBACK
+                continue
+            if report["products"]:
+                return revised, report, assess(revised, report) if assess else None
+            feedback = report["text"]
+    if proposal["products"]:
+        proposal = dict(
+            proposal,
+            reason="goal_mismatch",
+            products=[],
+            text=proposal["text"]
+            + "\n\nСсылка не создана: не удалось собрать корзину для показанного меню.",
+        )
+    nutrition.skip_cart(proposal["reason"])
+    return diet, proposal, assessment
+
+
 def complete_menu(nutrition, payload, diet, proposal, catalog, *, assess=None, assessment=None):
+    fallback = diet, proposal, assessment
     request = payload["nutrition_request"]
     terms = (
         READY_DISH_TERMS
@@ -149,11 +267,9 @@ def complete_menu(nutrition, payload, diet, proposal, catalog, *, assess=None, a
                     "initial_menu": diet,
                     "shopping_result": feedback,
                     "goal_feedback": goal_feedback,
-                    "catalog": (
-                        catalog_with_nutrition(cards.values())
-                        if estimated
-                        else list(cards.values())
-                    ),
+                    "catalog": catalog_with_nutrition(cards.values())
+                    if estimated
+                    else list(cards.values()),
                     "searched": list(catalog),
                 },
                 "nutrition_replacements",
@@ -190,12 +306,7 @@ def complete_menu(nutrition, payload, diet, proposal, catalog, *, assess=None, a
                 continue
         except (ValueError, KeyError, TypeError, ArithmeticError):
             if estimated and revisions < revision_limit:
-                feedback = (
-                    "Предыдущий вариант не удалось рассчитать. Используй только ID из catalog. "
-                    "Для каждого товара используй одну единицу порции во всём меню. "
-                    "Для порций в граммах и миллилитрах выбирай товары с подходящими единицами "
-                    "или указанным весом упаковки."
-                )
+                feedback = QUANTITY_FEEDBACK
                 revisions += 1
                 continue
             break
@@ -204,11 +315,15 @@ def complete_menu(nutrition, payload, diet, proposal, catalog, *, assess=None, a
             assessment = assess(revised, report) if assess else None
             if not assessment or assessment["status"] == "fit":
                 return revised, report, assessment
+            if not fallback[1]["products"]:
+                # Prefer a complete affordable menu and keep its own assessment with it.
+                fallback = revised, report, assessment
             if assessment["status"] == "clarify":
                 break
             goal_feedback = assessment["description"]
         feedback = report["text"]
         revisions += 1
-    if proposal["reason"]:
-        nutrition.skip_cart(proposal["reason"])
-    return diet, proposal, assessment
+    _, fallback_report, _ = fallback
+    if fallback_report["reason"]:
+        nutrition.skip_cart(fallback_report["reason"])
+    return fallback

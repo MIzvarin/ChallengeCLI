@@ -101,10 +101,15 @@ def test_followup_after_explicit_plan_uses_context_and_commits_one_chat_turn():
         catalog.search.assert_not_called()
         catalog = attach(service, client)
         structured = client.generate_structured.side_effect
+        reason = "По карточкам порции дают меньше калорий, чем вы планировали."
 
         def generate(messages, schema, purpose="memory_extraction"):
             if purpose == "nutrition_plan":
                 return json.dumps({"plan": DIET})
+            if purpose == "nutrition_goal_check":
+                return json.dumps({"status": "revise", "description": reason})
+            if purpose == "nutrition_replacements":
+                return json.dumps({"queries": [], "meals": [], "nutrition_summary": ""})
             return structured(messages, schema, purpose)
 
         client.generate_structured.side_effect = generate
@@ -119,7 +124,8 @@ def test_followup_after_explicit_plan_uses_context_and_commits_one_chat_turn():
         service.chat_plan = dispatch
         before = len(store.chat_messages())
         response = service.chat("На день")
-        assert DIET in response and "Корзина" in response
+        assert DIET in response and reason in response and "Корзина" in response
+        catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1}])
         saved = store.chat_messages()[before:]
         assert [row["content"] for row in saved] == ["На день", response]
         catalog.search.assert_called_once_with("гречка", cheaper=False)
@@ -449,7 +455,7 @@ def test_replacements_stop_without_cart_when_alternatives_exhausted_or_over_budg
             catalog.cart_link.assert_not_called()
 
 
-def test_full_cart_needs_goal_fit_and_rechecks_revised_portions():
+def test_full_cart_rechecks_revised_portions_before_preferring_them():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(profile(goal="Набрать мышечную массу"))
@@ -495,19 +501,30 @@ def test_full_cart_needs_goal_fit_and_rechecks_revised_portions():
         assert "Увеличьте порции" not in store.activity_logs()
 
 
-def test_unverified_goal_keeps_cart_closed_with_actionable_answer():
-    for status, reason in (("clarify", "нужны сведения"), ("revise", "рацион не подходит")):
+def test_unverified_goal_keeps_the_menu_and_requires_the_budget_for_a_cart():
+    for status, budget in (
+        ("clarify", None),
+        ("unavailable", None),
+        ("revise", None),
+        ("revise", 100),
+    ):
         with tempfile.TemporaryDirectory() as directory:
             store, client, service = fixture(directory)
             service.save(profile())
-            catalog = attach(service, client)
+            catalog = attach(service, client, route=dict(ROUTE, budget_rub=budget))
             fallback = client.generate_structured.side_effect
-            description = "Укажите текущий вес." if status == "clarify" else "Нужны другие порции."
+            description = {
+                "clarify": "Укажите текущий вес.",
+                "unavailable": "Сравнение по карточкам временно недоступно.",
+                "revise": "Нужны другие порции.",
+            }[status]
 
             def structured(messages, schema, purpose="memory_extraction"):
                 if purpose == "nutrition_plan":
                     return json.dumps({"plan": DIET})
                 if purpose == "nutrition_goal_check":
+                    if status == "unavailable":
+                        raise ValueError("PRIVATE")
                     return json.dumps({"status": status, "description": description})
                 if purpose == "nutrition_replacements":
                     assert status == "revise"
@@ -516,10 +533,17 @@ def test_unverified_goal_keeps_cart_closed_with_actionable_answer():
 
             client.generate_structured.side_effect = structured
             response = tool_call(service, {"requirements": "Готовлю дома на день"})
-            assert not response["isError"] and description in response["content"][0]["text"]
-            assert DIET not in response["content"][0]["text"]
-            catalog.cart_link.assert_not_called()
-            assert reason in store.activity_logs() and description not in store.activity_logs()
+            message = response["content"][0]["text"]
+            assert not response["isError"] and description in message
+            assert "PRIVATE" not in message
+            assert DIET in message and "Комментарий к рациону" in message
+            if budget is None:
+                catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1}])
+                assert "Корзина ВкусВилла:" in message
+            else:
+                assert "превышает бюджет 100,00 ₽" in message
+                catalog.cart_link.assert_not_called()
+            assert description not in store.activity_logs()
 
 
 def test_numeric_targets_reach_menu_and_replace_portions_before_cart():
@@ -584,6 +608,79 @@ def test_numeric_targets_reach_menu_and_replace_portions_before_cart():
         catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1}])
 
 
+def test_complete_catalog_menu_keeps_both_numeric_comments_and_requires_safety():
+    targets = {
+        "days": 1,
+        "limits": [
+            {"metric": "kcal", "scope": "daily", "target": 692, "minimum": None, "maximum": None},
+            {
+                "metric": "protein_g",
+                "scope": "daily",
+                "target": None,
+                "minimum": 25,
+                "maximum": None,
+            },
+        ],
+    }
+    for blocked in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            _, client, service = fixture(directory)
+            service.save(profile())
+            catalog = attach(service, client, queries=["гречка", "киноа"])
+            catalog.search.side_effect = [[raw_product()], []]
+            fallback = client.generate_structured.side_effect
+
+            def structured(messages, schema, purpose="memory_extraction"):
+                if purpose == "nutrition_targets":
+                    return json.dumps(targets)
+                if purpose == "nutrition_plan":
+                    return json.dumps({"plan": DIET})
+                if purpose == "nutrition_replacements":
+                    payload = json.loads(messages[-1]["content"])
+                    if payload["goal_feedback"]:
+                        return json.dumps({"queries": [], "meals": [], "nutrition_summary": ""})
+                    return json.dumps(
+                        {
+                            "queries": [],
+                            "meals": [
+                                {
+                                    "title": "Меню из каталога",
+                                    "portions": [{"id": 17681, "amount": 150, "measure": "г"}],
+                                }
+                            ],
+                            "nutrition_summary": "",
+                        }
+                    )
+                return fallback(messages, schema, purpose)
+
+            def safety(messages, stage):
+                payload = json.loads(messages[-1]["content"])
+                status = "allow"
+                if stage == "response":
+                    catalog.cart_link.assert_not_called()
+                    assert "Меню из каталога" in payload["draft"]
+                    assert "519.0" in payload["draft"] and "19.5" in payload["draft"]
+                    status = "block" if blocked else "allow"
+                return safety_json(payload["required_rule_ids"], status=status)
+
+            client.generate_structured.side_effect = structured
+            client.generate_safety.side_effect = safety
+            result = tool_call(
+                service, {"requirements": "На день, готовлю дома, 692 ккал и 25 г белка."}
+            )
+            message = result["content"][0]["text"]
+            assert result["isError"] == blocked
+            if blocked:
+                assert "Не могу показать подготовленный ответ" in message
+                assert "Меню из каталога" not in message
+                catalog.cart_link.assert_not_called()
+            else:
+                assert "Меню из каталога" in message and DIET not in message
+                assert "519.0" in message and "19.5" in message
+                assert "Комментарий к рациону" in message
+                catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1}])
+
+
 def test_numeric_targets_check_each_day_and_use_lower_supplier_value():
     from fitagent.nutrition_targets import check_targets
 
@@ -615,7 +712,7 @@ def test_numeric_targets_check_each_day_and_use_lower_supplier_value():
     assert not check_targets(targets, [double, double], {1: [double], 2: [double]})
 
 
-def test_failed_menu_shows_final_reason_without_attempt_warnings():
+def test_unmatched_menu_shows_its_comment_without_attempt_warnings():
     with tempfile.TemporaryDirectory() as directory:
         store, client, service = fixture(directory)
         service.save(profile())
@@ -641,9 +738,10 @@ def test_failed_menu_shows_final_reason_without_attempt_warnings():
         outcome = tool_call(service, {"requirements": "На день, готовлю дома."})
         reply = outcome["content"][0]["text"]
         assert not outcome["isError"] and reply.count("Не хватает продуктов.") == 1
+        assert DIET in reply
         assert "Промежуточное замечание" not in reply
         assert store.chat_messages()[-1]["content"] == reply
-        catalog.cart_link.assert_not_called()
+        catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1}])
 
 
 def test_conflicting_numeric_targets_show_a_russian_input_error():

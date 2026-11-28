@@ -9,6 +9,7 @@ from fitagent.memory_schema import SAFETY_CATEGORIES, parse_stamp, reported_orde
 DAILY_SAFETY_CATEGORIES = sorted(
     SAFETY_CATEGORIES | {"medications", "supplements", "symptoms", "recovery"}
 )
+DAILY_PLAN_FORMAT_VERSION = 5
 
 
 def initialize_state(db):
@@ -50,8 +51,20 @@ def initialize_state(db):
     )
 
 
+def read_training_program(db):
+    row = db.execute("SELECT value FROM chat_state WHERE key='training_program'").fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def write_training_program(db, program):
+    db.execute(
+        "INSERT OR REPLACE INTO chat_state VALUES ('training_program',?)",
+        (json.dumps(program, ensure_ascii=False),),
+    )
+
+
 def daily_plan_input_key(db, now):
-    """Identify the current safety inputs and active execution plan within a transaction."""
+    """Identify the plan format, current safety inputs and confirmed programs."""
     from fitagent.goal_state import EXECUTION, plan_key, read_state
 
     marks = ",".join("?" for _ in DAILY_SAFETY_CATEGORIES)
@@ -89,7 +102,16 @@ def daily_plan_input_key(db, now):
                 ):
                     execution = "paused"
                     break
-    inputs = (profile_id, weight["weight"] if weight else None, rules, goal_id, execution)
+    training = read_training_program(db)
+    inputs = (
+        DAILY_PLAN_FORMAT_VERSION,
+        profile_id,
+        weight["weight"] if weight else None,
+        rules,
+        goal_id,
+        execution,
+        (training["id"], bool(training.get("paused_turns"))) if training else None,
+    )
     return hashlib.sha256(json.dumps(inputs, ensure_ascii=False).encode()).hexdigest()
 
 

@@ -12,6 +12,7 @@ from fitagent.domain import (
 )
 from fitagent.goal_state import initial_state
 from fitagent.memory import project
+from fitagent.training import INVITATION
 
 QUESTIONS = (
     (
@@ -45,7 +46,7 @@ QUESTIONS = (
     ),
     (
         "training",
-        "Есть ли программа тренировок? Укажите дни, упражнения и нагрузку или напишите «нет».",
+        "Как вы сейчас тренируетесь? Опишите виды занятий и частоту или напишите «нет».",
     ),
     (
         "wake_time",
@@ -58,7 +59,7 @@ FACT_FIELDS = {
     "routine": ("meal_routine", "reported_routine", "Привычный режим питания"),
     "supplements": ("supplements", "reported_regimen", "Принимаемые добавки"),
     "medications": ("medications", "reported_regimen", "Принимаемые лекарства"),
-    "training": ("training_routine", "reported_program", "Текущая программа тренировок"),
+    "training": ("training_routine", "reported_routine", "Текущий режим тренировок"),
 }
 FIELD_NAMES = {
     "дата рождения": "birth_date",
@@ -253,4 +254,6 @@ class ChatOnboarding:
             + notice
             + "\n\n"
             + self.service.workflow.describe(initial_state(self.store.latest("goals")["id"]))
+            + "\n\n"
+            + INVITATION
         )

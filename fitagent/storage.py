@@ -14,6 +14,7 @@ from fitagent.state_storage import (
     daily_plan_input_key,
     initialize_state,
     profile_weight,
+    read_training_program,
     record_activity,
     weight_rows,
 )
@@ -182,6 +183,24 @@ class Storage:
                 (now.date().isoformat(), now.isoformat(), role, content, status),
             )
             return cursor.lastrowid
+
+    def save_training_exchange(self, session, question, response, now):
+        day, stamp = now.date().isoformat(), now.isoformat()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT value FROM settings WHERE key='session'").fetchone()
+            if current is None or current[0] != session:
+                return False
+            db.executemany(
+                "INSERT INTO messages(day,created_at,role,content,status) VALUES (?,?,?,?,'training')",
+                ((day, stamp, "user", question), (day, stamp, "assistant", response)),
+            )
+        return True
+
+    def training_paused(self):
+        with self.connect() as db:
+            program = read_training_program(db)
+        return bool(program and program.get("paused_turns"))
 
     def set_status(self, message_id, status):
         with self.connect() as db:

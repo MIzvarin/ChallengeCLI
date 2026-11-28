@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 
+from fitagent import training
 from fitagent.safety_schema import SAFETY_FAILURE_REASONS
 
 ACTIVITY_KINDS = (
@@ -25,6 +26,7 @@ ACTIVITY_KINDS = (
     "nutrition_cart_skipped",
 )
 MCP_OPERATIONS = {"search": "поиск товаров", "cart_link": "создание ссылки на корзину"}
+TRAINING_OPERATIONS = (training.CREATE, training.CONFIRM, training.TODAY)
 MCP_RETRY_REASONS = {
     "timeout": "истекло время ожидания",
     "network": "сбой соединения",
@@ -80,8 +82,9 @@ def activity_message(kind, details):
         return None
     if kind in {"mcp_started", "mcp_finished", "mcp_failed"}:
         code = details.get("operation")
-        if code in ("create_nutrition_plan", "create_daily_plan"):
-            prefix = f"MCP FitAgent  {code}"
+        if code in ("create_nutrition_plan", "create_daily_plan", *TRAINING_OPERATIONS):
+            label = "FitAgent · тренировки" if code in TRAINING_OPERATIONS else "FitAgent"
+            prefix = f"MCP {label}  {code}"
             if kind == "mcp_started":
                 return prefix + " · начато"
             duration = details.get("duration_ms")

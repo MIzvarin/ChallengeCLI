@@ -6,16 +6,18 @@ import json
 import tempfile
 import unittest
 from datetime import timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from support import safety_json
 from test_fitagent import NOW, fixture, profile
 from test_goal_review_fixes import pending_goal
 from test_layered_memory import ANSWERS
-from test_memory import extract, operation
-from test_nutrition import DIET, NONE, attach
+from test_memory import error, extract, operation
+from test_nutrition import CHOICE, DIET, NONE, attach, raw_product
+from test_training import agree, proposal
 from textual.widgets import Input, RichLog
 
+from fitagent import training
 from fitagent.daily_plan import ERROR, NAME, PENDING, PROFILE_ERROR
 from fitagent.nutrition import NUTRITION_ERROR
 from fitagent.plan_mcp import request_daily_plan, request_plan, serve, tool_call
@@ -32,7 +34,20 @@ def mock_plan(service, client, schedule=None, *, route=None, assessment=None, di
             assert schedule is not None
             return json.dumps(schedule, ensure_ascii=False)
         if purpose == "nutrition_plan":
-            return json.dumps({"plan": diet}, ensure_ascii=False)
+            return json.dumps({"plan": diet, "meal_count": 3}, ensure_ascii=False)
+        if purpose == "nutrition_replacements":
+            return json.dumps(
+                {
+                    "meals": [
+                        {
+                            "title": meal,
+                            "portions": [{"id": 17681, "amount": amount, "measure": "г"}],
+                        }
+                        for meal, amount in (("Завтрак", 20), ("Обед", 50), ("Ужин", 30))
+                    ]
+                },
+                ensure_ascii=False,
+            )
         if purpose == "nutrition_goal_check" and assessment is not None:
             return json.dumps(assessment, ensure_ascii=False)
         if purpose == "nutrition_estimate_context":
@@ -98,8 +113,8 @@ def test_daily_plan_uses_reminders_and_preferences_and_reuses_cart_same_day():
         ):
             service.chat(answer)
         service.clock = lambda: now
+        agree(service, client)
         schedule = {
-            "training": "Приседания, 3 подхода по 8 повторений.",
             "supplements": "Сегодня по вашему режиму — Добавка А.",
             "missing": ["Уточните дозу добавки, если она у вас указана."],
         }
@@ -124,10 +139,10 @@ def test_daily_plan_uses_reminders_and_preferences_and_reuses_cart_same_day():
         }
         schedule_data = payloads["daily_schedule"]
         assert schedule_data["weekday"] == "понедельник" and schedule_data["wake_time"] == "08:00"
-        assert "Понедельник: приседания 3×8" in schedule_data["training_facts"][0]["value"]["text"]
+        assert "training_facts" not in schedule_data
         assert "Добавка А" in schedule_data["supplement_facts"][0]["value"]["text"]
         menu = payloads["nutrition_plan"]
-        assert menu["daily_plan"]["training"] == schedule["training"]
+        assert menu["daily_plan"]["training"] == "- Приседания — 3 подхода по 8 повторений"
         assert menu["nutrition_targets"]["days"] == 1
         assert menu["nutrition_request"]["food_format"] == "cook"
         assert text(call(service)) == text(first)
@@ -146,7 +161,7 @@ def test_missing_data_keeps_meal_and_cart_and_the_next_date_gets_a_new_plan():
         catalog = mock_plan(service, client, route=NONE)
         first = call(service)
         assert not first["isError"], first
-        assert "Укажите дни и упражнения" in text(first)
+        assert training.INVITATION in text(first)
         assert "какие добавки вы принимаете" in text(first)
         assert "/wake ЧЧ:ММ" in text(first)
         assert DIET in text(first) and "Корзина ВкусВилла" in text(first)
@@ -326,7 +341,7 @@ def test_paused_goal_is_excluded_from_daily_schedule_and_menu():
     with tempfile.TemporaryDirectory() as directory:
         _, client, service = pending_goal(directory)
         assert "Выполнение плана пока не продолжаем" in service.start_chat()
-        schedule = {"training": "Прогулка", "supplements": "Нет", "missing": []}
+        schedule = {"supplements": "Нет", "missing": []}
         mock_plan(service, client, schedule)
         result = call(service)
         assert not result["isError"], result
@@ -335,19 +350,21 @@ def test_paused_goal_is_excluded_from_daily_schedule_and_menu():
             for item in client.generate_structured.call_args_list
             if "purpose" in item.kwargs
         }
-        assert payloads["daily_schedule"]["accepted_goal_plan"] == ""
+        assert "accepted_goal_plan" not in payloads["daily_schedule"]
         assert payloads["nutrition_plan"]["goal_state"] is None
         assert payloads["nutrition_plan"]["goal"] is None
+        assert "Подтверждённой программы тренировок пока нет" in text(result)
         assert DIET in text(result)
 
 
-def test_unsuitable_menu_keeps_reminders_and_reports_assessment_once():
-    schedule = {"training": "Приседания", "supplements": "Добавка А", "missing": []}
+def test_daily_plan_keeps_menu_and_cart_when_nutrition_assessment_is_advisory():
+    schedule = {"supplements": "Добавка А", "missing": []}
     for status in ("clarify", "revise"):
         with tempfile.TemporaryDirectory() as directory:
             _, client, service = fixture(directory)
             for answer in ANSWERS:
                 service.chat(answer)
+            agree(service, client)
             reason = "Уточните фактический объём порций."
             catalog = mock_plan(
                 service, client, schedule, assessment={"status": status, "description": reason}
@@ -361,10 +378,298 @@ def test_unsuitable_menu_keeps_reminders_and_reports_assessment_once():
                 "### Добавки",
                 "Добавка А",
                 "### Питание",
+                DIET if status == "clarify" else "Крупа гречневая — 50 г",
+                "Комментарий к рациону",
             ):
                 assert fragment in text(result)
             assert text(result).count(reason) == 1
-            catalog.cart_link.assert_not_called()
+            catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1}])
+
+
+def test_daily_plan_rebuilds_cart_when_initial_selection_cannot_be_used():
+    complete = {
+        "meals": [
+            {
+                "title": "Завтрак",
+                "portions": [{"id": 17681, "amount": 100, "measure": "г"}],
+            },
+            {"title": "Обед", "portions": [{"id": 52, "amount": 230, "measure": "г"}]},
+            {
+                "title": "Ужин",
+                "portions": [
+                    {"id": 52, "amount": 150, "measure": "г"},
+                    {"id": 53, "amount": 120, "measure": "г"},
+                ],
+            },
+        ],
+    }
+    for selection_error in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            store, client, service = fixture(directory)
+            service.save(profile())
+            catalog = mock_plan(service, client)
+            fallback = client.generate_structured.side_effect
+            cards = {
+                "гречка": raw_product(),
+                "курица": raw_product(id=52, name="Куриное филе"),
+                "морковь": raw_product(id=53, name="Морковь"),
+            }
+            catalog.search.side_effect = lambda query, cheaper: (
+                [cards[query]] if query in cards else []
+            )
+            first_meals = (
+                [
+                    {
+                        "title": "Завтрак",
+                        "portions": [{"id": 999, "amount": 100, "measure": "г"}],
+                    },
+                    *complete["meals"][1:],
+                ]
+                if selection_error
+                else []
+            )
+            steps = iter([{"meals": first_meals}, complete])
+
+            def structured(messages, schema, purpose):
+                if purpose == "nutrition_queries":
+                    return json.dumps({"queries": ["гречка", "суп"]})
+                if purpose == "nutrition_selection":
+                    return json.dumps(
+                        {"items": [dict(CHOICE, id=999) if selection_error else CHOICE]}
+                    )
+                if purpose == "nutrition_replacements":
+                    step = next(steps)
+                    ids = schema["properties"]["meals"]["items"]["properties"]["portions"]["items"][
+                        "properties"
+                    ]["id"]["enum"]
+                    assert set(ids) == {17681, 52, 53}
+                    assert schema["properties"]["meals"]["minItems"] == 3
+                    return json.dumps(step, ensure_ascii=False)
+                return fallback(messages, schema, purpose)
+
+            client.generate_structured.side_effect = structured
+            result = call(service)
+            assert not result["isError"] and "Корзина ВкусВилла:" in text(result)
+            assert all(meal in text(result) for meal in ("Завтрак", "Обед", "Ужин"))
+            assert "Куриное филе — 230 г" in text(result)
+            assert "Ссылка на корзину не создана" not in text(result)
+            catalog.cart_link.assert_called_once_with(
+                [{"id": 17681, "q": 1.0}, {"id": 52, "q": 1.0}, {"id": 53, "q": 1.0}]
+            )
+            assert store.daily_plan_status(NOW) == "saved"
+
+
+def test_daily_plan_does_not_link_a_mismatched_basket_when_rebuilding_fails():
+    with tempfile.TemporaryDirectory() as directory:
+        _, client, service = fixture(directory)
+        service.save(profile())
+        catalog = mock_plan(
+            service, client, assessment={"status": "revise", "description": "Набор не подходит."}
+        )
+        fallback = client.generate_structured.side_effect
+
+        def structured(messages, schema, purpose):
+            if purpose == "nutrition_replacements":
+                return json.dumps({"meals": []})
+            return fallback(messages, schema, purpose)
+
+        client.generate_structured.side_effect = structured
+        result = call(service)
+        assert not result["isError"] and DIET in text(result)
+        assert "Ссылка не создана" in text(result)
+        catalog.cart_link.assert_not_called()
+
+
+def test_daily_plan_gets_a_cart_even_when_the_initial_menu_response_is_malformed():
+    with tempfile.TemporaryDirectory() as directory:
+        _, client, service = fixture(directory)
+        service.save(profile())
+        catalog = mock_plan(service, client)
+        fallback = client.generate_structured.side_effect
+
+        def structured(messages, schema, purpose):
+            if purpose == "nutrition_plan":
+                return json.dumps({"plan": "Ответ без числа приёмов пищи."})
+            return fallback(messages, schema, purpose)
+
+        client.generate_structured.side_effect = structured
+        result = call(service)
+        assert not result["isError"] and "Корзина ВкусВилла:" in text(result)
+        assert "Обед" in text(result) and "Крупа гречневая — 50 г" in text(result)
+        assert "Не удалось составить рацион" not in text(result)
+        catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1.0}])
+        assert not any(
+            invocation.kwargs["purpose"] == "nutrition_selection"
+            for invocation in client.generate_structured.call_args_list
+        )
+
+
+def test_confirming_training_invalidates_cached_daily_plan_and_rest_is_explicit():
+    with tempfile.TemporaryDirectory() as directory:
+        store, client, service = fixture(directory)
+        service.save(profile())
+        reported = "Понедельник: отжимания по старому расписанию"
+        extract(client, operation(reported, category="training_routine", key="reported_program"))
+        service.answer(reported)
+        catalog = mock_plan(service, client)
+        initial = call(service)
+        assert not initial["isError"] and training.INVITATION in text(initial)
+        assert reported not in text(initial)
+        client.generate_structured.side_effect = None
+        agree(service, client)
+        assert store.daily_plan_status(NOW) == "missing"
+        mock_plan(service, client)
+        refreshed = call(service)
+        assert not refreshed["isError"] and "Приседания" in text(refreshed)
+        assert call(service) == refreshed
+        assert catalog.cart_link.call_count == 1
+        assert any(row["status"] == "outdated_daily_plan" for row in store.chat_messages(now=NOW))
+        service.clock = lambda: NOW + timedelta(days=1)
+        rest = call(service)
+        assert not rest["isError"] and "День отдыха." in text(rest)
+        assert "Приседания" not in text(rest)
+
+
+def test_tui_training_confirmation_refreshes_todays_plan():
+    async def scenario(directory):
+        store, client, service = fixture(directory)
+        service.save(profile())
+        mock_plan(service, client)
+        daily_model = client.generate_structured.side_effect
+        client.generate_structured.side_effect = lambda messages, schema, purpose: (
+            json.dumps(proposal(), ensure_ascii=False)
+            if purpose == "training_program"
+            else daily_model(messages, schema, purpose)
+        )
+
+        async def request(_):
+            result = call(service)
+            assert not result["isError"], result
+            return text(result)
+
+        app = FitAgentApp(service, daily_plan_request=request)
+        async with app.run_test(size=(110, 50)) as pilot:
+            await app.workers.wait_for_complete()
+            field = app.query_one("#question", Input)
+            field.value = "/training"
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            assert store.daily_plan_status(NOW) == "saved"
+            field.value = training.ACCEPT
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            daily = [row for row in store.chat_messages(now=NOW) if row["status"] == "daily_plan"]
+            assert len(daily) == 1 and "Приседания" in daily[0]["content"]
+            log = "\n".join(line.text for line in app.query_one("#chat", RichLog).lines)
+            assert "Программа тренировок подтверждена" in log and "3 подхода" in log
+
+    with tempfile.TemporaryDirectory() as directory:
+        asyncio.run(scenario(directory))
+
+
+def test_training_block_pauses_current_workout_and_refreshes_daily_plan_in_tui():
+    async def scenario(directory):
+        store, client, service = fixture(directory)
+        service.save(profile())
+        agree(service, client)
+        mock_plan(service, client)
+        daily_model = client.generate_structured.side_effect
+        revision = proposal()
+        report = "Врач запретил мне приседать."
+        second_report = "Врач запретил мне отжиматься."
+
+        def structured(messages, schema, purpose):
+            if purpose == "training_program":
+                return json.dumps(revision, ensure_ascii=False)
+            return daily_model(messages, schema, purpose)
+
+        def safety(messages, stage):
+            payload = json.loads(messages[-1]["content"])
+            dialogue, draft = payload["dialogue"] or "", payload["draft"] or ""
+            blocked = stage == "response" and (
+                (report in dialogue and "Приседания" in draft)
+                or (second_report in dialogue and "Отжимания" in draft)
+            )
+            return safety_json(
+                payload["required_rule_ids"],
+                status="block" if blocked else "allow",
+                description="Упражнение противоречит ограничению.",
+            )
+
+        client.generate_structured.side_effect = structured
+        client.generate_safety.side_effect = safety
+
+        async def request(_):
+            result = call(service)
+            assert not result["isError"], result
+            return text(result)
+
+        app = FitAgentApp(service, daily_plan_request=request)
+        async with app.run_test(size=(110, 50)) as pilot:
+            await app.workers.wait_for_complete()
+            assert "Приседания" in text(call(service))
+            field = app.query_one("#question", Input)
+            field.value = "/training " + report
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert service.training_tool(training.TODAY, {}) == {
+                "status": "paused",
+                "exercises": [],
+            }
+            current = store.chat_messages(now=NOW)
+            assert any(row["status"] == "outdated_daily_plan" for row in current)
+            updated = [row["content"] for row in current if row["status"] == "daily_plan"]
+            assert len(updated) == 1 and training.PAUSE_NOTICE in updated[0]
+            assert "Приседания" not in updated[0] and DIET in updated[0]
+            memory = json.loads(service.memory.context())
+            assert memory["training_program_paused"] and "confirmed_training_program" not in memory
+            assert training.PAUSE_NOTICE in service.memory.command("/memory")
+
+        service.clock = lambda: NOW + timedelta(days=7)
+        rest_of_pause = call(service)
+        assert training.PAUSE_NOTICE in text(rest_of_pause)
+        assert "Приседания" not in text(rest_of_pause)
+
+        revision = proposal("Отжимания")
+        blocked = error(lambda: service.chat("/training " + second_report), "Не могу показать")
+        assert training.PAUSE_NOTICE in blocked
+        revision = proposal("Жим сидя")
+        assert "Жим сидя" in service.chat("/training Предложи безопасную замену.")
+        draft_safety = json.loads(client.generate_safety.call_args.args[0][-1]["content"])
+        assert report in draft_safety["dialogue"] and second_report in draft_safety["dialogue"]
+        assert service.training_tool(training.TODAY, {})["status"] == "paused"
+        assert training.SAVED == service.chat(training.ACCEPT)
+        assert store.daily_plan_status(service.clock()) == "missing"
+        refreshed = call(service)
+        assert "Жим сидя" in text(refreshed) and training.PAUSE_NOTICE not in text(refreshed)
+
+    with tempfile.TemporaryDirectory() as directory:
+        asyncio.run(scenario(directory))
+
+
+def test_daily_plan_uses_current_menu_format_and_preserves_previous_result():
+    with tempfile.TemporaryDirectory() as directory:
+        store, client, service = fixture(directory)
+        service.save(profile())
+        old = "Не удалось подобрать рацион, который подходит для вашей цели."
+        with patch("fitagent.state_storage.DAILY_PLAN_FORMAT_VERSION", 1):
+            attempt, _ = store.reserve_daily_plan(NOW)
+            assert store.finish_daily_plan(NOW.date().isoformat(), attempt, old, NOW)
+            assert store.daily_plan_status(NOW) == "saved"
+        assert store.daily_plan_status(NOW) == "missing"
+        catalog = mock_plan(
+            service, client, assessment={"status": "revise", "description": "Не хватает белка."}
+        )
+        result = call(service)
+        assert not result["isError"], result
+        assert "Крупа гречневая — 50 г" in text(result) and "Не хватает белка." in text(result)
+        assert call(service) == result
+        catalog.cart_link.assert_called_once_with([{"id": 17681, "q": 1}])
+        before, current = store.chat_messages(now=NOW)
+        assert before["content"] == old and before["status"] == "outdated_daily_plan"
+        assert current["content"] == text(result) and current["status"] == "daily_plan"
 
 
 def test_relevant_followup_carries_daily_reply_to_memory_chat_and_safety():

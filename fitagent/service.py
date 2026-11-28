@@ -23,13 +23,18 @@ from fitagent.memory_schema import reported_order
 from fitagent.onboarding import ChatOnboarding
 from fitagent.safety import SafetyGuard
 from fitagent.topics import TOPIC_CONTEXT_RULES, TopicRouter
+from fitagent.training import ACCEPT as ACCEPT_TRAINING
+from fitagent.training import PROFILE_ERROR as TRAINING_PROFILE_ERROR
+from fitagent.training_chat import TrainingChat
 
 HISTORY_LIMIT = 50_000
 SUMMARY_LIMIT = 20_000
 
 
 class FitnessService:
-    def __init__(self, store, client, clock=None, nutrition=None, chat_plan=None):
+    def __init__(
+        self, store, client, clock=None, nutrition=None, chat_plan=None, training_request=None
+    ):
         self.store, self.client = store, client
         self.chat_plan = chat_plan
         self.nutrition = nutrition
@@ -40,6 +45,15 @@ class FitnessService:
         self.workflow = GoalWorkflow(self)
         self.actions = ChatActions(self)
         self.onboarding = ChatOnboarding(self)
+        self.training_request = training_request
+        self.training_chat = TrainingChat(self)
+
+    def training_tool(self, name, arguments):
+        if self.training_request is not None:
+            return self.training_request(name, arguments)
+        from fitagent.training_mcp import run_tool
+
+        return run_tool(self, name, arguments)
 
     def next_check(self):
         return next_check(self.clock())
@@ -104,7 +118,11 @@ class FitnessService:
         text = text.strip()
         if not text:
             raise ValueError("Введите ответ или вопрос.")
+        session = self.store.session_id()
         if not self.current_profile() or self.onboarding.state() is not None:
+            command = text.casefold()
+            if command in {"/training", ACCEPT_TRAINING} or command.startswith("/training "):
+                raise ValueError(TRAINING_PROFILE_ERROR)
             response = self.onboarding.respond(text)
             self.store.message("assistant", response, self.clock(), "onboarding")
             return response
@@ -115,6 +133,12 @@ class FitnessService:
             return response
         if text.casefold() == ACCEPT_PLAN:
             return self.workflow.confirm(text)
+        response = self.training_chat.respond(text)
+        if response is not None:
+            if not self.store.save_training_exchange(session, text, response, self.clock()):
+                self.training_chat.reset()
+                raise ValueError("Данные очищены в другом окне. Откройте чат заново.")
+            return response
         return self.answer(text, manage_goal=True)
 
     def audit(self, kind, details):
@@ -122,6 +146,7 @@ class FitnessService:
 
     def clear(self):
         self.client.session_id = self.store.clear()
+        self.training_chat.reset()
 
     def due(self):
         result = reminder_due(self.store.latest("profiles"), self.clock())
